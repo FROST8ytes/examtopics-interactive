@@ -448,10 +448,7 @@ async fn get_user(token: &str) -> Result<User> {
 pub async fn refresh_user() -> Result<User> {
     let token = access_token().await?;
     let user = get_user(&token).await?;
-    if let Some(mut s) = SESSION.peek().clone() {
-        s.user = user.clone();
-        set_session(Some(s));
-    }
+    replace_session_user(&user);
     Ok(user)
 }
 
@@ -470,11 +467,18 @@ async fn update_user(body: Value, redirect: bool) -> Result<User> {
         .send()
         .await?;
     let user: User = check(resp).await?.json().await?;
-    if let Some(mut s) = SESSION.peek().clone() {
+    replace_session_user(&user);
+    Ok(user)
+}
+
+fn replace_session_user(user: &User) {
+    // Bind the clone first: in `if let … = SESSION.peek().clone()` the read guard would
+    // live through the body and `set_session`'s write would panic with AlreadyBorrowed.
+    let current = SESSION.peek().clone();
+    if let Some(mut s) = current {
         s.user = user.clone();
         set_session(Some(s));
     }
-    Ok(user)
 }
 
 /// Sets or changes the password. Lets Google / GitHub users sign in with email too.

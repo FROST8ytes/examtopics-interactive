@@ -20,6 +20,13 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+# Used by `dx bundle --web --release`. Must not strip: wasm-bindgen reads its data from
+# custom sections of the .wasm file.
+[profile.wasm-release]
+inherits = "release"
+strip = false
+opt-level = "s"
+
 [profile.wasm-dev]
 inherits = "dev"
 opt-level = 1

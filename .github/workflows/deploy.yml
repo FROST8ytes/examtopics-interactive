@@ -1,0 +1,57 @@
+# Builds the Dioxus web app and publishes the static site to the `vercel-site` branch,
+# which Vercel deploys as-is (no build on Vercel: its build image is too old for `dx`).
+#
+# Needs repository variables (Settings → Secrets and variables → Actions → Variables):
+#   SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY  (both public values, baked into the app)
+name: Build site
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-site
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+      DX_VERSION: "0.7.10"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Dioxus CLI
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall "dioxus-cli@${DX_VERSION}" --no-confirm
+          dx --version
+      - name: Build
+        run: |
+          test -n "$SUPABASE_URL" && test -n "$SUPABASE_PUBLISHABLE_KEY" \
+            || { echo "Set the SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY repository variables"; exit 1; }
+          dx bundle --web --release --package web --out-dir dist-build
+          mkdir -p site
+          if [ -d dist-build/public ]; then mv dist-build/public site/public; else mv dist-build site/public; fi
+          cp deploy/vercel.json site/vercel.json
+          ls -la site/public
+      - name: Publish to the vercel-site branch
+        run: |
+          cd site
+          git init -q -b vercel-site
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Site build from ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" vercel-site

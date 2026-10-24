@@ -146,16 +146,13 @@ Allowlisted uploaders also get **Explain all with Claude** on a certification, w
 
 ## 4. Deploy to Vercel
 
-The web app is a static site, so Vercel only serves files. Supabase does the rest.
+Vercel's build image is too old to run the Dioxus CLI, so the site is built by GitHub Actions and Vercel only serves the result:
 
-1. Import the repository in Vercel and keep **Root Directory** at the repository root. `vercel.json` sets everything else:
-   - install: `scripts/vercel-install.sh` installs Rust, the wasm target and `dx` 0.7.10
-   - build: `scripts/vercel-build.sh` runs `dx bundle --web --release` into `dist/`
-   - every route rewrites to `index.html` (client-side routing)
-2. Add the environment variables `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` for Production and Preview.
-3. Deploy, then add the deployment URL to Supabase's redirect URLs (step 1.4).
-
-Building with Rust on Vercel takes a few minutes. To make it faster, build in CI and upload the result: `vercel build && vercel deploy --prebuilt`.
+1. `.github/workflows/deploy.yml` runs on every push to `main`. It runs `dx bundle --web --release` and force-pushes the static site, together with `deploy/vercel.json` (SPA rewrites and headers), to the **`vercel-site`** branch.
+2. In GitHub, go to **Settings → Secrets and variables → Actions → Variables** and add two repository **variables**: `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Both are public values that are baked into the app.
+3. In Vercel, import the repository with the **Other** preset, and set **Settings → Git → Production Branch** to `vercel-site`. The root `vercel.json` turns off Vercel deployments of `main`. The `vercel-site` branch has its own `vercel.json` with a no-op build.
+4. Add the custom domain in Vercel, and in Cloudflare create the CNAME record Vercel shows. Use **DNS only** (grey cloud) so Vercel can issue the certificate.
+5. Add `https://<domain>/auth/callback` to Supabase's redirect URLs, and set the Site URL to `https://<domain>`.
 
 ## Using it
 

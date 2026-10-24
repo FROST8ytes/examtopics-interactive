@@ -147,6 +147,14 @@ pub async fn profile(user_id: &str) -> Result<Option<Profile>> {
     .await
 }
 
+/// Whether the signed-in user may queue work for the owner's Claude subscription
+/// (profile flag or invited email; decided by the database).
+pub async fn can_use_explainer() -> bool {
+    db::rpc::<bool>("can_use_explainer", &json!({}))
+        .await
+        .unwrap_or(false)
+}
+
 pub async fn can_edit(certification_id: &str) -> bool {
     db::rpc::<bool>(
         "can_edit_certification",

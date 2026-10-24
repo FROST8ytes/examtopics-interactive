@@ -19,16 +19,11 @@ struct Loaded {
 }
 
 async fn load(id: String) -> Result<Loaded, String> {
-    let user_id = crate::supabase::auth::SESSION
-        .peek()
-        .as_ref()
-        .map(|s| s.user.id.clone())
-        .unwrap_or_default();
-    let (cert, stats, can_edit, profile) = futures_util::join!(
+    let (cert, stats, can_edit, can_explain) = futures_util::join!(
         data::certification(&id),
         data::my_stats(Some(&id)),
         data::can_edit(&id),
-        data::profile(&user_id)
+        data::can_use_explainer()
     );
     Ok(Loaded {
         cert: cert
@@ -36,7 +31,7 @@ async fn load(id: String) -> Result<Loaded, String> {
             .ok_or("Certification not found")?,
         stats: stats.map_err(|e| e.to_string())?,
         can_edit,
-        can_explain: profile.ok().flatten().is_some_and(|p| p.can_use_explainer),
+        can_explain,
     })
 }
 

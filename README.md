@@ -128,12 +128,13 @@ Without a machine that's always on, run it on a schedule with GitHub Actions ins
 
 Only accounts on the **explainer allowlist** (`profiles.can_use_explainer`) can queue questions for your worker. The database enforces this: `request_explanations` refuses everyone else, and answering a question only queues it for allowlisted users. Explanations that already exist are visible to everyone, since they cost nothing more to show. Everyone else gets a **Use your own Claude** button on the question, which copies a ready-made prompt and opens claude.ai, so they use their own account.
 
-Add someone to the allowlist (SQL editor):
+Invite someone by email (SQL editor). This works before or after they sign up, with any sign-in method, once the email is verified:
 
 ```sql
-update public.profiles set can_use_explainer = true
-where id = (select id from auth.users where email = 'person@example.com');
+insert into public.explainer_invites (email) values ('person@example.com');
 ```
+
+Alternatively, flag an existing account directly with `update public.profiles set can_use_explainer = true where id = '<user id>';`.
 
 Allowlisted uploaders also get **Explain all with Claude** on a certification, which queues every question in advance. Otherwise questions are queued as allowlisted people answer them.
 

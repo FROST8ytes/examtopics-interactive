@@ -47,17 +47,12 @@ async fn load(id: String) -> Result<Loaded, String> {
     );
     let questions = questions.map_err(e)?;
     let ids: Vec<String> = questions.iter().map(|q| q.id.clone()).collect();
-    let user_id = SESSION
-        .peek()
-        .as_ref()
-        .map(|s| s.user.id.clone())
-        .unwrap_or_default();
-    let (explanations, jobs, images, can_edit, profile) = futures_util::join!(
+    let (explanations, jobs, images, can_edit, can_explain) = futures_util::join!(
         data::explanations(&ids),
         data::jobs(&ids),
         data::image_urls(&questions),
         data::can_edit(&set.certification_id),
-        data::profile(&user_id),
+        data::can_use_explainer(),
     );
     let resume = stats
         .unwrap_or_default()
@@ -75,7 +70,7 @@ async fn load(id: String) -> Result<Loaded, String> {
         explanations: explanations.unwrap_or_default(),
         jobs: jobs.unwrap_or_default(),
         can_edit,
-        can_explain: profile.ok().flatten().is_some_and(|p| p.can_use_explainer),
+        can_explain,
     })
 }
 

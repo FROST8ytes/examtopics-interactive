@@ -246,6 +246,13 @@ pub fn Login(next: String) -> Element {
                         }
                     }
                 }
+                p { class: "tiny muted", style: "text-align:center",
+                    "By continuing you agree to the "
+                    Link { class: "link", to: crate::Route::Terms {}, "Terms" }
+                    " and "
+                    Link { class: "link", to: crate::Route::Privacy {}, "Privacy Policy" }
+                    "."
+                }
             }
         }
     }

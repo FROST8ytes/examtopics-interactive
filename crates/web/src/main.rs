@@ -22,6 +22,10 @@ pub enum Route {
     Login { next: String },
     #[route("/auth/callback")]
     AuthCallback {},
+    #[route("/privacy")]
+    Privacy {},
+    #[route("/terms")]
+    Terms {},
     #[layout(AppShell)]
         #[route("/")]
         Dashboard {},

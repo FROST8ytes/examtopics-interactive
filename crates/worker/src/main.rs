@@ -17,10 +17,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use claude::ClaudeConfig;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use supabase::{Job, Supabase};
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
+
+/// How long the watching worker waits after hitting the subscription's usage limit.
+const LIMIT_PAUSE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -39,9 +43,10 @@ struct Args {
     /// Claude Code executable.
     #[arg(long, env = "CLAUDE_BIN", default_value = "claude")]
     claude_bin: String,
-    /// Model alias or id passed to Claude Code (defaults to Claude Code's default model).
-    #[arg(long, env = "EXPLAINER_MODEL")]
-    model: Option<String>,
+    /// Model alias or id passed to Claude Code. Sonnet stretches subscription limits further
+    /// than Opus; pass an empty value to use Claude Code's own default.
+    #[arg(long, env = "EXPLAINER_MODEL", default_value = "sonnet")]
+    model: String,
     /// Effort level passed to Claude Code (low, medium, high, xhigh, max).
     #[arg(long, env = "EXPLAINER_EFFORT")]
     effort: Option<String>,
@@ -80,7 +85,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = Arc::new(ClaudeConfig {
         bin: args.claude_bin.clone(),
-        model: args.model.clone(),
+        model: Some(args.model.clone()).filter(|m| !m.is_empty()),
         effort: args.effort.clone(),
         web: args.web,
         allow_api_key: args.allow_api_key,
@@ -100,7 +105,32 @@ async fn main() -> Result<()> {
         "explainer started"
     );
 
+    let paused = Arc::new(AtomicBool::new(false));
     loop {
+        if paused.load(Ordering::SeqCst) {
+            // Usage limit reached: let in-flight jobs finish, then stop (CI) or wait.
+            let busy = args.concurrency.max(1) - slots.available_permits();
+            if busy > 0 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            if args.once {
+                warn!(
+                    "Claude usage limit reached; stopping. Queued jobs stay pending for the next run."
+                );
+                return Ok(());
+            }
+            warn!(
+                "Claude usage limit reached; waiting {} minutes",
+                LIMIT_PAUSE.as_secs() / 60
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(LIMIT_PAUSE) => {}
+                _ = tokio::signal::ctrl_c() => { info!("stopping"); return Ok(()); }
+            }
+            paused.store(false, Ordering::SeqCst);
+            continue;
+        }
         let free = slots.available_permits();
         let jobs = if free == 0 {
             Vec::new()
@@ -128,12 +158,20 @@ async fn main() -> Result<()> {
             let permit = slots.clone().acquire_owned().await?;
             let db = db.clone();
             let cfg = cfg.clone();
+            let paused = paused.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 let started = std::time::Instant::now();
                 match process(&db, &cfg, &job).await {
                     Ok(model) => {
                         info!(job = job.id, question = %job.question_id, %model, secs = started.elapsed().as_secs(), "explained")
+                    }
+                    Err(e) if claude::is_usage_limit(&format!("{e:#}")) => {
+                        // Not the question's fault: hand it back without using up an attempt.
+                        paused.store(true, Ordering::SeqCst);
+                        if let Err(e2) = db.release_job(job.id, &format!("{e:#}")).await {
+                            error!("could not release job: {e2:#}");
+                        }
                     }
                     Err(e) => {
                         warn!(job = job.id, attempt = job.attempts, "failed: {e:#}");

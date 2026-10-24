@@ -118,13 +118,31 @@ cargo run --release -p explainer             # watches the queue
 cargo run --release -p explainer -- --once   # drain the queue and exit
 ```
 
-Options (flag or env var): `--model` / `EXPLAINER_MODEL` (e.g. `opus`), `--effort`, `--web` (lets Claude check the docs online: slower, more accurate), `--concurrency`. The worker removes `ANTHROPIC_API_KEY` from Claude Code's environment so the subscription is always used. Pass `--allow-api-key` if you want the key used instead.
+Options (flag or env var): `--model` / `EXPLAINER_MODEL` (default `sonnet`, which stretches your limits further; `opus` for harder questions), `--effort`, `--web` (lets Claude check the docs online: slower, more accurate), `--concurrency`. The worker removes `ANTHROPIC_API_KEY` from Claude Code's environment so the subscription is always used. Pass `--allow-api-key` if you want the key used instead.
 
 Without a machine that's always on, run it on a schedule with GitHub Actions instead. `.github/workflows/explainer.yml` runs every 15 minutes. Create a long-lived subscription token with `claude setup-token`, then add the repository secrets `CLAUDE_CODE_OAUTH_TOKEN`, `SUPABASE_URL` and `SUPABASE_SECRET_KEY`.
 
 > **Usage policy:** the worker uses Claude Code, Anthropic's own client, with *your* login, and stores the results for your team. Anthropic doesn't allow third-party apps to offer claude.ai login to *their* users, which is why the web app never asks users to connect their Claude account.
 
-Uploaders can press **Explain all with Claude** on a certification to queue every question in advance. Otherwise questions are queued as people answer them.
+### Who can use your subscription
+
+Only accounts on the **explainer allowlist** (`profiles.can_use_explainer`) can queue questions for your worker. The database enforces this: `request_explanations` refuses everyone else, and answering a question only queues it for allowlisted users. Explanations that already exist are visible to everyone, since they cost nothing more to show. Everyone else gets a **Use your own Claude** button on the question, which copies a ready-made prompt and opens claude.ai, so they use their own account.
+
+Add someone to the allowlist (SQL editor):
+
+```sql
+update public.profiles set can_use_explainer = true
+where id = (select id from auth.users where email = 'person@example.com');
+```
+
+Allowlisted uploaders also get **Explain all with Claude** on a certification, which queues every question in advance. Otherwise questions are queued as allowlisted people answer them.
+
+### Staying within your subscription
+
+- Each question is explained once and cached, no matter how many people answer it.
+- Keep **extra usage** turned off in your Claude account settings. When you hit a usage limit, the worker puts the question back in the queue without counting the attempt, then stops (`--once`) or waits 15 minutes before trying again.
+- `ANTHROPIC_API_KEY` is removed from Claude Code's environment, so the API is never billed by accident.
+- GitHub Actions minutes are free for public repositories.
 
 ## 4. Deploy to Vercel
 

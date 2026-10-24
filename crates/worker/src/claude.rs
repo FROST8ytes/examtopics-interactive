@@ -133,3 +133,34 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     }
 }
+
+/// Claude Code reports exhausted subscription limits (and API throttling) as errors whose
+/// text mentions the limit. These are retried later instead of failing the question.
+pub fn is_usage_limit(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "usage limit",
+        "limit reached",
+        "rate limit",
+        "rate_limit",
+        "429",
+        "overloaded",
+        "quota",
+    ]
+    .iter()
+    .any(|needle| e.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_usage_limit;
+
+    #[test]
+    fn recognises_limit_errors() {
+        assert!(is_usage_limit(
+            "Claude Code failed (success): Claude AI usage limit reached|1792857600"
+        ));
+        assert!(is_usage_limit("API Error: 429 rate_limit_error"));
+        assert!(!is_usage_limit("unexpected Claude Code output: not json"));
+    }
+}

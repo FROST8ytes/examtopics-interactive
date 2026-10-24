@@ -96,6 +96,16 @@ impl Supabase {
         .map(|_| ())
     }
 
+    /// Returns a job to the queue without counting the attempt.
+    pub async fn release_job(&self, job: i64, reason: &str) -> Result<()> {
+        self.rpc::<Value>(
+            "release_ai_job",
+            json!({ "p_job_id": job, "p_reason": reason }),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn fail_job(&self, job: i64, error: &str) -> Result<()> {
         self.rpc::<Value>("fail_ai_job", json!({ "p_job_id": job, "p_error": error }))
             .await

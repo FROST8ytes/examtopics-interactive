@@ -91,6 +91,9 @@ pub struct Profile {
     pub id: String,
     pub display_name: Option<String>,
     pub is_admin: bool,
+    /// May queue explanations for the owner's Claude subscription.
+    #[serde(default)]
+    pub can_use_explainer: bool,
 }
 
 // ---- library -----------------------------------------------------------------
@@ -139,7 +142,7 @@ pub async fn question(id: &str) -> Result<Option<QuestionRow>> {
 pub async fn profile(user_id: &str) -> Result<Option<Profile>> {
     db::select_one(
         "profiles",
-        &format!("select=id,display_name,is_admin&id=eq.{user_id}"),
+        &format!("select=id,display_name,is_admin,can_use_explainer&id=eq.{user_id}"),
     )
     .await
 }

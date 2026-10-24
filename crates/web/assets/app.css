@@ -244,6 +244,8 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; }
 
+.legal ul { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.legal h3 { margin-top: 0.5rem; }
 textarea.code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; min-height: 14rem; }
 .avatar-img { width: 1.9rem; height: 1.9rem; border-radius: 999px; object-fit: cover; border: 1px solid var(--border); }
 .avatar-fallback { width: 1.9rem; height: 1.9rem; border-radius: 999px; display: grid; place-items: center; background: var(--primary-color-6); font-size: 0.8rem; font-weight: 700; }

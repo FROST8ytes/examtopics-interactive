@@ -15,13 +15,20 @@ struct Loaded {
     cert: Certification,
     stats: Vec<SetStats>,
     can_edit: bool,
+    can_explain: bool,
 }
 
 async fn load(id: String) -> Result<Loaded, String> {
-    let (cert, stats, can_edit) = futures_util::join!(
+    let user_id = crate::supabase::auth::SESSION
+        .peek()
+        .as_ref()
+        .map(|s| s.user.id.clone())
+        .unwrap_or_default();
+    let (cert, stats, can_edit, profile) = futures_util::join!(
         data::certification(&id),
         data::my_stats(Some(&id)),
-        data::can_edit(&id)
+        data::can_edit(&id),
+        data::profile(&user_id)
     );
     Ok(Loaded {
         cert: cert
@@ -29,6 +36,7 @@ async fn load(id: String) -> Result<Loaded, String> {
             .ok_or("Certification not found")?,
         stats: stats.map_err(|e| e.to_string())?,
         can_edit,
+        can_explain: profile.ok().flatten().is_some_and(|p| p.can_use_explainer),
     })
 }
 
@@ -143,8 +151,10 @@ pub fn CertificationPage(id: String) -> Element {
                 }
                 if l.can_edit {
                     div { class: "row",
-                        Button { variant: ButtonVariant::Outline, disabled: busy(), onclick: queue_all,
-                            Sparkles { size: "16px" } "Explain all with Claude"
+                        if l.can_explain {
+                            Button { variant: ButtonVariant::Outline, disabled: busy(), onclick: queue_all,
+                                Sparkles { size: "16px" } "Explain all with Claude"
+                            }
                         }
                         Button { variant: ButtonVariant::Destructive, disabled: busy(), onclick: delete,
                             Trash2 { size: "16px" } "Delete"

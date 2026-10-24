@@ -29,6 +29,8 @@ struct Loaded {
     explanations: HashMap<String, ExplanationRow>,
     jobs: HashMap<String, JobRow>,
     can_edit: bool,
+    /// On the explainer allowlist (the owner's Claude subscription).
+    can_explain: bool,
 }
 
 async fn load(id: String) -> Result<Loaded, String> {
@@ -45,11 +47,17 @@ async fn load(id: String) -> Result<Loaded, String> {
     );
     let questions = questions.map_err(e)?;
     let ids: Vec<String> = questions.iter().map(|q| q.id.clone()).collect();
-    let (explanations, jobs, images, can_edit) = futures_util::join!(
+    let user_id = SESSION
+        .peek()
+        .as_ref()
+        .map(|s| s.user.id.clone())
+        .unwrap_or_default();
+    let (explanations, jobs, images, can_edit, profile) = futures_util::join!(
         data::explanations(&ids),
         data::jobs(&ids),
         data::image_urls(&questions),
         data::can_edit(&set.certification_id),
+        data::profile(&user_id),
     );
     let resume = stats
         .unwrap_or_default()
@@ -67,6 +75,7 @@ async fn load(id: String) -> Result<Loaded, String> {
         explanations: explanations.unwrap_or_default(),
         jobs: jobs.unwrap_or_default(),
         can_edit,
+        can_explain: profile.ok().flatten().is_some_and(|p| p.can_use_explainer),
     })
 }
 
@@ -100,6 +109,7 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
     let questions = data.questions.clone();
     let total = questions.len();
     let set_id = data.set.id.clone();
+    let can_explain = data.can_explain;
     let mut pos = use_signal(|| start);
     let mut drafts = use_signal(HashMap::<String, Response>::new);
     let mut results = use_signal(|| {
@@ -222,7 +232,9 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                 );
                 drafts.write().remove(&current.id);
                 revealed.write().insert(current.id.clone());
-                if !explanations.peek().contains_key(&current.id)
+                // Answers only queue an explanation for allowlisted users (see record_answer).
+                if can_explain
+                    && !explanations.peek().contains_key(&current.id)
                     && !jobs.peek().contains_key(&current.id)
                 {
                     jobs.write().insert(
@@ -495,6 +507,7 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                             explanation: explanations.read().get(&qid).cloned(),
                             job: jobs.read().get(&qid).cloned(),
                             can_edit: data.can_edit,
+                            can_request: data.can_explain,
                             on_request: request_explanation,
                             on_apply_answer: apply_answer,
                         }

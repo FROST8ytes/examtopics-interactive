@@ -451,6 +451,8 @@ pub fn ExplanationPanel(
     explanation: Option<ExplanationRow>,
     job: Option<JobRow>,
     can_edit: bool,
+    /// On the explainer allowlist; everyone else is pointed at their own Claude.
+    can_request: bool,
     on_request: EventHandler<bool>,
     on_apply_answer: EventHandler<String>,
 ) -> Element {
@@ -462,6 +464,14 @@ pub fn ExplanationPanel(
     };
 
     let Some(exp) = explanation else {
+        if !can_request {
+            return rsx! {
+                div { class: "explain",
+                    {header}
+                    OwnClaude { row: row.clone() }
+                }
+            };
+        }
         let status = job.as_ref().map(|j| j.status.as_str());
         return rsx! {
             div { class: "explain",
@@ -572,6 +582,88 @@ pub fn SourceExplanation(q: Question) -> Element {
                     div { class: "refs",
                         for r in q.references.iter() { a { href: "{r}", target: "_blank", rel: "noopener noreferrer", "{r}" } }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Builds a self-contained prompt for people who explain questions with their own Claude.
+pub fn claude_prompt(q: &Question) -> String {
+    let mut p = String::from(
+        "Explain this certification practice question. The answer key comes from an ExamTopics dump and is \
+         sometimes wrong, so work out the correct answer yourself from official documentation, say whether \
+         you agree with the key, and explain why each option is right or wrong.\n\n",
+    );
+    if let Some(cs) = &q.case_study {
+        p.push_str(&format!("Case study:\n{cs}\n\n"));
+    }
+    p.push_str(&format!("Question ({}):\n{}\n", q.kind.label(), q.body));
+    match &q.kind {
+        QuestionKind::Choice { options, .. } => {
+            p.push('\n');
+            for o in options {
+                p.push_str(&format!("{}. {}\n", o.key, o.text));
+            }
+        }
+        QuestionKind::Dropdown { groups } => {
+            p.push_str("\nAnswer area:\n");
+            for g in groups {
+                p.push_str(&format!("- {} [{}]\n", g.label, g.options.join(" | ")));
+            }
+        }
+        QuestionKind::DragDrop { items, slots, .. } => {
+            p.push_str(&format!("\nItems:\n{}\n", items.join("\n")));
+            let labels: Vec<&str> = slots.iter().map(|s| s.label.as_str()).collect();
+            p.push_str(&format!("Targets:\n{}\n", labels.join("\n")));
+        }
+        QuestionKind::Visual { .. } => {
+            p.push_str(
+                "\n(This question includes an image; I can describe or upload it if needed.)\n",
+            );
+        }
+    }
+    p.push_str(&format!(
+        "\nAnswer key in the dump: {}\n",
+        q.kind.answer_summary()
+    ));
+    if !q.community_votes.is_empty() {
+        let votes: Vec<String> = q
+            .community_votes
+            .iter()
+            .map(|v| format!("{} {}%", v.answer, v.percent))
+            .collect();
+        p.push_str(&format!("Community vote: {}\n", votes.join(", ")));
+    }
+    p
+}
+
+/// "Use your own Claude": copies a ready-made prompt and opens claude.ai.
+#[component]
+fn OwnClaude(row: QuestionRow) -> Element {
+    let mut copied = use_signal(|| false);
+    let prompt = claude_prompt(&row.data);
+    rsx! {
+        div { class: "stack-sm",
+            p { class: "small",
+                "Explanations for this app run on the owner's Claude subscription, so they're only generated for invited accounts. "
+                "You can get the same explanation with your own Claude account:"
+            }
+            div { class: "row",
+                Button {
+                    size: ButtonSize::Sm,
+                    onclick: move |_| {
+                        let prompt = prompt.clone();
+                        async move {
+                            if crate::ui::copy_to_clipboard(&prompt).await {
+                                copied.set(true);
+                            }
+                        }
+                    },
+                    if copied() { Check { size: "14px" } "Prompt copied" } else { "1. Copy prompt" }
+                }
+                a { href: "https://claude.ai/new", target: "_blank", rel: "noopener noreferrer",
+                    Button { size: ButtonSize::Sm, variant: ButtonVariant::Outline, Sparkles { size: "14px" } "2. Open Claude and paste" }
                 }
             }
         }

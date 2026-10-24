@@ -16,7 +16,7 @@ wasm-bindgen-futures = "0.4.79"
 js-sys = "0.3.106"
 web-sys = { version = "0.3.106", features = [
     "Window", "Document", "Location", "History", "Storage", "Crypto",
-    "HtmlInputElement", "UrlSearchParams", "FileList", "File", "Blob", "Element", "ScrollToOptions", "ScrollBehavior",
+    "HtmlInputElement", "UrlSearchParams", "FileList", "File", "Blob", "Element", "ScrollToOptions", "ScrollBehavior", "Navigator", "Clipboard",
 ] }
 sha2 = "0.11.1"
 base64 = "0.23.1"

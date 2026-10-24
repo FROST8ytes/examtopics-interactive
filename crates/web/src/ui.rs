@@ -196,3 +196,12 @@ pub fn percent(part: i32, total: i32) -> i32 {
         ((part as f64 / total as f64) * 100.0).round() as i32
     }
 }
+
+/// Copies text with the async Clipboard API. Returns whether it worked.
+pub async fn copy_to_clipboard(text: &str) -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let promise = window.navigator().clipboard().write_text(text);
+    wasm_bindgen_futures::JsFuture::from(promise).await.is_ok()
+}

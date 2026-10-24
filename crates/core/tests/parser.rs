@@ -285,3 +285,85 @@ fn plans_sets_by_topic_and_chunk() {
     assert_eq!(titles[3], "Topic 2 – Contoso, Ltd. Case Study");
     assert_eq!(plan_sets(&out, 0).len(), 2);
 }
+
+/// Patterns seen in a real OCR'd SC-100 export: topic misread in headers ("Topic 7" for
+/// "Topic 1"), headers lost entirely (with or without their "Correct Answer" line) and
+/// picture text glued into a header row.
+const OCR_NOISE: &str = r#"
+Topic 1 - Question Set 1
+Question #1    Topic 7
+You need to recommend a privacy solution.
+A. Microsoft Priva
+B. Microsoft Viva
+Correct Answer: A
+Community vote distribution
+A (100%)
+HOTSPOT -
+You have an Azure subscription.
+Hot Area:
+[gap 80]
+Question #3    Topic 17
+You have a hotspot whose answer is only a picture.
+HOTSPOT -
+Correct Answer: B
+Box 1: Azure Purview
+Note: This question is part of a series of questions that present the same scenario.
+Solution: You enable MFA.
+Does this meet the goal?
+A. Yes
+B. No
+Correct Answer: B
+---page---
+Topic 2 - Question Set 2
+Question #1 For the inbound connections: v    Topic 2
+You have two virtual networks.
+A. Peering
+B. VPN
+Correct Answer: A
+"#;
+
+#[test]
+fn recovers_from_ocr_noise() {
+    let out = parse_pages(&pages(OCR_NOISE));
+    let summary: Vec<(u32, u32, &str)> = out
+        .questions
+        .iter()
+        .map(|q| (q.question.topic, q.question.number, q.question.kind.label()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (1, 1, "Single choice"),
+            // Header and answer key both lost: recovered after the community vote.
+            (1, 2, "Hotspot"),
+            (1, 3, "Hotspot"),
+            // Header lost, found from the "Note: This question is part of a series" opener.
+            (1, 4, "Single choice"),
+            (2, 1, "Single choice"),
+        ],
+        "{summary:?}"
+    );
+    assert!(out.questions[1].warnings[0].contains("number 2 was inferred"));
+    assert!(
+        out.questions[3]
+            .question
+            .body
+            .starts_with("Note: This question is part of a series")
+    );
+    assert_eq!(
+        out.topics.iter().map(|t| t.number).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(plan_sets(&out, 50).len(), 2);
+}
+
+#[test]
+fn guesses_exam_code_from_file_names() {
+    use examcore::parse::guess_exam_code;
+    assert_eq!(
+        guess_exam_code("21042026 SC-100 OCR").as_deref(),
+        Some("SC-100")
+    );
+    assert_eq!(guess_exam_code("AZ104 dump").as_deref(), Some("AZ104"));
+    assert_eq!(guess_exam_code("21042026 export"), None);
+}

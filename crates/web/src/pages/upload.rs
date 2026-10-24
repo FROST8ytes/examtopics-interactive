@@ -136,13 +136,20 @@ pub fn Upload() -> Element {
             return;
         }
         let file_stem = opened.name.trim_end_matches(".pdf").to_string();
-        code.set(out.exam_code.clone().unwrap_or_else(|| file_stem.clone()));
+        // Exports often have no title page; the file name ("21042026 SC-100 OCR.pdf")
+        // usually still carries the exam code.
+        let exam_code = out
+            .exam_code
+            .clone()
+            .or_else(|| examcore::parse::guess_exam_code(&file_stem));
         name.set(
             out.title
                 .clone()
                 .map(|t| t.chars().take(120).collect())
-                .unwrap_or(file_stem),
+                .or_else(|| exam_code.clone())
+                .unwrap_or_else(|| file_stem.clone()),
         );
+        code.set(exam_code.unwrap_or(file_stem));
         parsed.set(Some(out));
         stage.set(Stage::Review);
     };

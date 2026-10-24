@@ -150,6 +150,13 @@ fn is_page_number(s: &str) -> bool {
         && k.contains('#')
 }
 
+/// Question / topic headers and answer keys often sit at the very top of a page and,
+/// with digits normalised, look like a repeated running header. Never strip them.
+fn is_structural(text: &str) -> bool {
+    let t = text.trim_start().to_ascii_lowercase();
+    t.starts_with("question") || t.starts_with("topic") || t.starts_with("correct answer")
+}
+
 fn in_band(line: &Line, page_height: f32) -> bool {
     line.bottom <= page_height * BAND || line.top >= page_height * (1.0 - BAND)
 }
@@ -175,7 +182,7 @@ fn strip_running_text(pages: &[RawPage], per_page: Vec<Vec<Line>>) -> Vec<Line> 
             let h = raw.height;
             let counts = &counts;
             lines.into_iter().filter(move |l| {
-                if !in_band(l, h) {
+                if !in_band(l, h) || is_structural(&l.text) {
                     return true;
                 }
                 if is_page_number(&l.text) {
@@ -234,6 +241,28 @@ mod tests {
         let lines = build_lines(&pages);
         assert_eq!(lines.len(), 5);
         assert!(lines.iter().all(|l| l.text.starts_with("Body")));
+    }
+
+    #[test]
+    fn keeps_question_headers_at_the_top_of_many_pages() {
+        let pages: Vec<RawPage> = (0..6)
+            .map(|i| RawPage {
+                width: 600.0,
+                height: 800.0,
+                items: vec![
+                    item(&format!("Question #{} Topic 1", i + 1), 10.0, 20.0),
+                    item(&format!("Body {i}"), 10.0, 300.0),
+                ],
+            })
+            .collect();
+        let lines = build_lines(&pages);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.text.starts_with("Question #"))
+                .count(),
+            6
+        );
     }
 
     #[test]

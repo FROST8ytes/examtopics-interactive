@@ -71,6 +71,8 @@ re!(
     r"(?i)^\s*question\s*(#|no\.?|:)?\s*:?\s*(\d{1,4})\b\s*(.*)$"
 );
 re!(TOPIC_IN_HEADER, r"(?i)^[\s\-–—|,]*topic\s*(\d{1,3})\s*$");
+// OCR sometimes glues picture text into the header row: "Question #55 For the inbound … Topic 2".
+re!(TOPIC_AT_END, r"(?i)\btopic\s*(\d{1,3})\s*$");
 re!(
     TOPIC_LINE,
     r"(?i)^\s*topic\s*(\d{1,3})\b\s*[-–—:,.]?\s*(.{0,100})$"
@@ -95,6 +97,10 @@ re!(
 re!(
     AREA_MARKER,
     r"(?i)^\s*(hot\s*area|answer\s*area|select\s*and\s*place)\s*[:\-]?\s*(.*)$"
+);
+re!(
+    QUESTION_OPENER,
+    r"(?i)^\s*(note:\s*this question is part of a series|you have\b|your (company|organization|network)\b)"
 );
 re!(INTRO_INFO, r"(?i)^\s*introductory\s+info");
 re!(BARE_QUESTION, r"(?i)^\s*question\s*$");
@@ -135,8 +141,10 @@ pub fn parse_pages(pages: &[RawPage]) -> ParseOutput {
 pub fn parse_lines(lines: &[Line], pages: &[PageInfo]) -> ParseOutput {
     let mut out = ParseOutput::default();
 
-    // Pull out topic headings ("Topic 2 - Case Study 1") so they don't end up in bodies.
+    // Pull out topic headings ("Topic 2 - Case Study 1") so they don't end up in bodies,
+    // remembering where they were: they decide the topic of the questions that follow.
     let mut kept: Vec<&Line> = Vec::with_capacity(lines.len());
+    let mut headings: Vec<(usize, u32)> = Vec::new();
     for line in lines {
         if let Some(c) = TOPIC_LINE.captures(&line.text)
             && line.text.len() <= 110
@@ -144,6 +152,7 @@ pub fn parse_lines(lines: &[Line], pages: &[PageInfo]) -> ParseOutput {
         {
             let number: u32 = c[1].parse().unwrap_or(0);
             let title = c[2].trim().to_string();
+            headings.push((kept.len(), number));
             if !out.topics.iter().any(|t| t.number == number) {
                 out.topics.push(TopicInfo { number, title });
             } else if let Some(t) = out
@@ -158,13 +167,20 @@ pub fn parse_lines(lines: &[Line], pages: &[PageInfo]) -> ParseOutput {
         kept.push(line);
     }
 
-    let headers: Vec<(usize, u32, Option<u32>)> = kept
+    let mut starts: Vec<Start> = kept
         .iter()
         .enumerate()
-        .filter_map(|(i, l)| header(&l.text).map(|(n, t)| (i, n, t)))
+        .filter_map(|(idx, l)| {
+            header(&l.text).map(|(n, t)| Start {
+                idx,
+                number: Some(n),
+                header_topic: t,
+            })
+        })
         .collect();
+    recover_missing_starts(&kept, &mut starts);
 
-    let preamble_end = headers.first().map(|h| h.0).unwrap_or(kept.len());
+    let preamble_end = starts.first().map(|s| s.idx).unwrap_or(kept.len());
     let preamble: Vec<&str> = kept[..preamble_end]
         .iter()
         .take(4)
@@ -178,15 +194,39 @@ pub fn parse_lines(lines: &[Line], pages: &[PageInfo]) -> ParseOutput {
     }
 
     let mut current_topic = 1;
-    for (h, &(start, number, topic)) in headers.iter().enumerate() {
-        let end = headers.get(h + 1).map(|n| n.0).unwrap_or(kept.len());
-        if let Some(t) = topic {
-            current_topic = t;
+    let mut previous_number = 0;
+    for (s, start) in starts.iter().enumerate() {
+        let end = starts.get(s + 1).map(|n| n.idx).unwrap_or(kept.len());
+        // Section headings are reliable; the "Topic N" printed in each question header is
+        // often misread by OCR (1 → 7, 1 → 17), so it is only used when there are none.
+        let topic = match headings.iter().rev().find(|h| h.0 <= start.idx) {
+            Some(&(_, topic)) => topic,
+            None if headings.is_empty() => start.header_topic.unwrap_or(current_topic),
+            None => current_topic,
+        };
+        if topic != current_topic {
+            previous_number = 0;
         }
-        let block = &kept[start..end];
+        current_topic = topic;
+        let number = start.number.unwrap_or(previous_number + 1);
+        previous_number = number;
+        let block = &kept[start.idx..end];
         let next_top = kept.get(end).map(|l| (l.page, l.top));
-        out.questions
-            .push(parse_block(number, current_topic, block, next_top, pages));
+        let mut parsed = parse_block(
+            number,
+            current_topic,
+            block,
+            start.number.is_some(),
+            next_top,
+            pages,
+        );
+        if start.number.is_none() {
+            parsed.warnings.insert(
+                0,
+                format!("The \"Question #\" header was unreadable; number {number} was inferred"),
+            );
+        }
+        out.questions.push(parsed);
     }
     if !out.topics.iter().any(|t| t.number == 1)
         && out.questions.iter().any(|q| q.question.topic == 1)
@@ -211,32 +251,106 @@ pub fn parse_lines(lines: &[Line], pages: &[PageInfo]) -> ParseOutput {
     out
 }
 
+/// Finds an exam code such as `SC-100` or `AZ-104` in free text (e.g. a file name).
+pub fn guess_exam_code(text: &str) -> Option<String> {
+    EXAM_CODE
+        .captures_iter(text)
+        .map(|c| c[1].to_string())
+        // "21042026" style dates are digits only and never match; prefer codes with letters.
+        .find(|code| code.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
 /// Recognises `Question #12 Topic 1`. Returns (number, topic).
 fn header(text: &str) -> Option<(u32, Option<u32>)> {
     let c = QUESTION_HEADER.captures(text)?;
     let number: u32 = c[2].parse().ok()?;
     let rest = c[3].trim();
+    let has_hash = c.get(1).is_some();
     let topic = TOPIC_IN_HEADER
         .captures(rest)
+        .or_else(|| has_hash.then(|| TOPIC_AT_END.captures(rest)).flatten())
         .and_then(|t| t[1].parse().ok());
     // "Question 3 of the case study ..." is body text, not a header.
-    let has_hash = c.get(1).is_some();
     (has_hash && (rest.is_empty() || topic.is_some() || rest.len() < 3)
         || topic.is_some()
         || rest.is_empty())
     .then_some((number, topic))
 }
 
+/// Where a question starts in the line stream.
+struct Start {
+    idx: usize,
+    /// `None` when OCR lost the "Question #N" header and the start was recovered.
+    number: Option<u32>,
+    header_topic: Option<u32>,
+}
+
+/// OCR occasionally drops a "Question #N" header (sometimes together with the
+/// "Correct Answer" line), which glues two questions together. After a question's answer,
+/// the next question has started when we see a HOTSPOT / DRAG DROP marker or anything
+/// after the community vote. As a last resort, when a second answer key follows, a typical
+/// question opener ("You have …", "Note: This question is part of a series …") is used.
+fn recover_missing_starts(kept: &[&Line], starts: &mut Vec<Start>) {
+    let mut recovered = Vec::new();
+    for (s, start) in starts.iter().enumerate() {
+        let end = starts.get(s + 1).map(|n| n.idx).unwrap_or(kept.len());
+        let mut from = start.idx + 1;
+        while let Some(answer) = (from..end).find(|&i| CORRECT_ANSWER.is_match(&kept[i].text)) {
+            let next_answer = (answer + 1..end).find(|&i| CORRECT_ANSWER.is_match(&kept[i].text));
+            let window = answer + 1..next_answer.unwrap_or(end);
+            let after_votes = window
+                .clone()
+                .find(|&i| COMMUNITY.is_match(&kept[i].text))
+                .and_then(|community| {
+                    // Skip the vote lines ("B (78%) C (22%)", "9%") that follow.
+                    (community + 1..window.end).find(|&i| {
+                        let t = kept[i].text.trim();
+                        !VOTE.is_match(t)
+                            && !t
+                                .trim_end_matches('%')
+                                .trim()
+                                .chars()
+                                .all(|c| c.is_ascii_digit())
+                    })
+                });
+            let marker = window
+                .clone()
+                .find(|&i| TYPE_MARKER.is_match(&kept[i].text));
+            let opener = next_answer.and_then(|_| {
+                window
+                    .clone()
+                    .find(|&i| QUESTION_OPENER.is_match(&kept[i].text))
+            });
+            let split = [after_votes, marker].into_iter().flatten().min().or(opener);
+            match split {
+                Some(idx) => {
+                    recovered.push(Start {
+                        idx,
+                        number: None,
+                        header_topic: None,
+                    });
+                    from = idx;
+                }
+                None => break,
+            }
+        }
+    }
+    starts.extend(recovered);
+    starts.sort_by_key(|s| s.idx);
+}
+
 fn parse_block(
     number: u32,
     topic: u32,
     block: &[&Line],
+    has_header: bool,
     next_top: Option<(u32, f32)>,
     pages: &[PageInfo],
 ) -> ParsedQuestion {
     let mut warnings = Vec::new();
+    // `header` only anchors the snapshot region; recovered blocks start with content.
     let header = block[0];
-    let body_lines = &block[1..];
+    let body_lines = if has_header { &block[1..] } else { block };
 
     let ca_idx = body_lines
         .iter()
@@ -251,6 +365,15 @@ fn parse_block(
 
     // ---- answer section -------------------------------------------------
     let answer = AnswerSection::parse(a_lines);
+    let keys = a_lines
+        .iter()
+        .filter(|l| CORRECT_ANSWER.is_match(&l.text))
+        .count();
+    if keys > 1 {
+        warnings.push(format!(
+            "Contains {keys} \"Correct Answer\" lines; OCR may have merged the next question into this one"
+        ));
+    }
 
     // ---- question section -----------------------------------------------
     let mut q: Vec<&Line> = q_lines.to_vec();

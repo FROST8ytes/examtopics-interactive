@@ -14,12 +14,7 @@ pub fn AuthCallback() -> Element {
     let mut error = use_signal(|| None::<(String, Option<String>)>);
 
     use_future(move || async move {
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let location = window.location();
-        let search = location.search().unwrap_or_default();
-        let hash = location.hash().unwrap_or_default();
+        let (search, hash) = auth::landing_url();
         let query = web_sys::UrlSearchParams::new_with_str(&search).ok();
         let fragment = web_sys::UrlSearchParams::new_with_str(hash.trim_start_matches('#')).ok();
         let get = |k: &str| {

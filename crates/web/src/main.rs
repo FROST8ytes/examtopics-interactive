@@ -41,6 +41,7 @@ pub enum Route {
 }
 
 fn main() {
+    supabase::auth::capture_landing_url();
     dioxus::launch(App);
 }
 

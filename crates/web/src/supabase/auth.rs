@@ -166,6 +166,24 @@ fn set_session(session: Option<Session>) {
     *SESSION.write() = session;
 }
 
+/// `(search, hash)` of the page URL at startup. The router rewrites the URL to its
+/// canonical form on load, which drops the `?code=` / `#access_token=` of auth redirects,
+/// so `main` captures them before launching.
+static LANDING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+pub fn capture_landing_url() {
+    if let Some(location) = web_sys::window().map(|w| w.location()) {
+        let _ = LANDING.set((
+            location.search().unwrap_or_default(),
+            location.hash().unwrap_or_default(),
+        ));
+    }
+}
+
+pub fn landing_url() -> (String, String) {
+    LANDING.get().cloned().unwrap_or_default()
+}
+
 pub fn origin() -> String {
     web_sys::window()
         .and_then(|w| w.location().origin().ok())

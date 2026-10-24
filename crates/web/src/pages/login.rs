@@ -260,6 +260,9 @@ pub fn friendly(message: &str, code: Option<&str>) -> String {
         "user_already_exists" | "email_exists" => "An account with this email already exists. Sign in instead.".into(),
         "weak_password" => format!("Password is too weak: {message}"),
         "over_email_send_rate_limit" => "Too many emails sent. Please wait a minute and try again.".into(),
+        "flow_state_not_found" | "flow_state_expired" | "bad_code_verifier" => {
+            "This sign-in link has expired or was already used. Please sign in again.".into()
+        }
         "identity_already_exists" => "That account is already linked to another user. Sign in with it instead — your guest progress will be merged.".into(),
         "manual_linking_disabled" => "Account linking is disabled in Supabase (Authentication → Settings → Allow manual linking).".into(),
         _ => message.to_string(),

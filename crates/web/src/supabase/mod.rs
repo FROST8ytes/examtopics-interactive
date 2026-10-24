@@ -64,13 +64,15 @@ impl From<serde_json::Error> for ApiError {
 
 pub type Result<T> = std::result::Result<T, ApiError>;
 
-/// Supabase services return slightly different error shapes; accept them all.
+/// Supabase services return slightly different error shapes (Auth sends both `code`
+/// and `error_code`), so every variant is its own field rather than an alias.
 #[derive(Deserialize, Default)]
 struct ErrorBody {
-    #[serde(alias = "error_code")]
+    error_code: Option<String>,
     code: Option<serde_json::Value>,
-    #[serde(alias = "error_description", alias = "msg")]
     message: Option<String>,
+    msg: Option<String>,
+    error_description: Option<String>,
     error: Option<String>,
 }
 
@@ -81,17 +83,22 @@ pub(crate) async fn check(resp: reqwest::Response) -> Result<reqwest::Response> 
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     let body: ErrorBody = serde_json::from_str(&text).unwrap_or_default();
-    let code = body.code.map(|c| match c {
+    let code = body.error_code.or(body.code.map(|c| match c {
         serde_json::Value::String(s) => s,
         other => other.to_string(),
-    });
-    let message = body.message.or(body.error).unwrap_or_else(|| {
-        if text.is_empty() {
-            format!("Request failed ({status})")
-        } else {
-            text
-        }
-    });
+    }));
+    let message = body
+        .msg
+        .or(body.message)
+        .or(body.error_description)
+        .or(body.error)
+        .unwrap_or_else(|| {
+            if text.is_empty() {
+                format!("Request failed ({status})")
+            } else {
+                text
+            }
+        });
     Err(ApiError {
         status,
         code,

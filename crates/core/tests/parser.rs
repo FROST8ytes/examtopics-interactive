@@ -367,3 +367,26 @@ fn guesses_exam_code_from_file_names() {
     assert_eq!(guess_exam_code("AZ104 dump").as_deref(), Some("AZ104"));
     assert_eq!(guess_exam_code("21042026 export"), None);
 }
+
+#[test]
+fn type_marker_merged_into_the_first_line() {
+    let text = "Question #23    Topic 1\n29 DRAG DROP For a Microsoft cloud environment, you need to recommend an architecture.\nSelect and Place:\n[gap 80]\nCorrect Answer:\n[gap 60]";
+    let out = parse_pages(&pages(text));
+    let q = &out.questions[0].question;
+    assert!(
+        matches!(
+            q.kind,
+            QuestionKind::Visual {
+                variant: VisualVariant::DragDrop,
+                ..
+            }
+        ),
+        "{:?}",
+        q.kind
+    );
+    assert!(
+        q.body.starts_with("For a Microsoft cloud environment"),
+        "{}",
+        q.body
+    );
+}

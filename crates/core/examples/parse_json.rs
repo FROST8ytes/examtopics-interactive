@@ -15,10 +15,26 @@ fn main() {
     let path = args
         .next()
         .expect("usage: parse_json <pages.json> [--verbose]");
-    let verbose = args.any(|a| a == "--verbose");
+    let rest: Vec<String> = args.collect();
+    let verbose = rest.iter().any(|a| a == "--verbose");
     let pages: Vec<RawPage> =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("read input"))
             .expect("parse JSON");
+    // `--lines N`: print the lines built for page N (1-based) and exit.
+    if let Some(n) = rest
+        .iter()
+        .position(|a| a == "--lines")
+        .and_then(|i| rest.get(i + 1)?.parse::<usize>().ok())
+    {
+        let lines = examcore::layout::build_lines(&pages[n - 1..n]);
+        for l in lines {
+            println!(
+                "{:6.1}-{:6.1} x{:5.0}-{:5.0} | {}",
+                l.top, l.bottom, l.left, l.right, l.text
+            );
+        }
+        return;
+    }
     let out = parse_pages(&pages);
 
     println!("pages: {}  questions: {}", pages.len(), out.questions.len());

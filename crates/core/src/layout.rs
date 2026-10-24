@@ -34,6 +34,9 @@ pub struct Line {
     pub left: f32,
     pub right: f32,
     pub text: String,
+    /// Several lines of the OCR layer were stacked on this one position, so the
+    /// reading order (and even word order) cannot be trusted.
+    pub stacked: bool,
 }
 
 impl Line {
@@ -63,62 +66,145 @@ pub fn build_lines(pages: &[RawPage]) -> Vec<Line> {
     strip_running_text(pages, per_page)
 }
 
+/// Consecutive items (in content-stream order) that continue one line of text.
+#[derive(Debug)]
+struct Run {
+    first: usize,
+    top: f32,
+    bottom: f32,
+    left: f32,
+    right: f32,
+    text: String,
+}
+
+impl Run {
+    fn centre(&self) -> f32 {
+        (self.top + self.bottom) / 2.0
+    }
+
+    fn height(&self) -> f32 {
+        (self.bottom - self.top).max(1.0)
+    }
+
+    fn overlaps(&self, other: &Run) -> bool {
+        let shared = self.right.min(other.right) - self.left.max(other.left);
+        shared
+            > 0.3
+                * (self.right - self.left)
+                    .min(other.right - other.left)
+                    .max(1.0)
+    }
+
+    /// Appends text, separated by a space unless the two pieces overlap
+    /// (which means one word was split into several items).
+    fn push(&mut self, text: &str, left: f32, right: f32, height: f32) {
+        let gap = left - self.right;
+        if !self.text.ends_with(' ') && !text.starts_with(' ') && gap > -0.6 * height {
+            self.text.push(' ');
+        }
+        self.text.push_str(text);
+        self.right = self.right.max(right);
+    }
+}
+
+/// Builds lines from a page's text items.
+///
+/// Items are first chained into runs in content-stream order (OCR layers emit one item
+/// per word), then runs are grouped into rows by vertical position. Runs on the same row
+/// that overlap horizontally are separate lines: OCR software sometimes misplaces a whole
+/// line on top of another, and sorting their words by x would interleave them.
 fn page_lines(page: u32, raw: &RawPage) -> Vec<Line> {
-    let mut items: Vec<&RawItem> = raw
-        .items
-        .iter()
-        .filter(|it| !it.s.trim().is_empty() && it.h > 0.0)
-        .collect();
-    items.sort_by(|a, b| {
-        (a.y + a.h / 2.0)
-            .total_cmp(&(b.y + b.h / 2.0))
-            .then(a.x.total_cmp(&b.x))
+    let mut runs: Vec<Run> = Vec::new();
+    for (i, it) in raw.items.iter().enumerate() {
+        if it.s.trim().is_empty() || it.h <= 0.0 {
+            continue;
+        }
+        let centre = it.y + it.h / 2.0;
+        let continues = runs.last().is_some_and(|r| {
+            (centre - r.centre()).abs() <= 0.5 * r.height().min(it.h)
+                // OCR word boxes may overlap the previous word a little.
+                && it.x >= r.right - it.h
+                && it.x - r.right <= 3.0 * it.h
+        });
+        match runs.last_mut() {
+            Some(r) if continues => {
+                r.push(&it.s, it.x, it.x + it.w, it.h);
+                r.top = r.top.min(it.y);
+                r.bottom = r.bottom.max(it.y + it.h);
+            }
+            _ => runs.push(Run {
+                first: i,
+                top: it.y,
+                bottom: it.y + it.h,
+                left: it.x,
+                right: it.x + it.w,
+                text: it.s.clone(),
+            }),
+        }
+    }
+    runs.sort_by(|a, b| {
+        a.centre()
+            .total_cmp(&b.centre())
+            .then(a.left.total_cmp(&b.left))
     });
 
-    // Cluster items whose vertical centres are close to each other.
-    let mut rows: Vec<Vec<&RawItem>> = Vec::new();
-    for it in items {
-        let centre = it.y + it.h / 2.0;
-        let joined = rows.last_mut().and_then(|row| {
-            let top = row.iter().map(|r| r.y).fold(f32::MAX, f32::min);
-            let bottom = row.iter().map(|r| r.y + r.h).fold(f32::MIN, f32::max);
-            let row_centre = (top + bottom) / 2.0;
-            let tolerance = (bottom - top).min(it.h) * 0.5;
-            ((centre - row_centre).abs() <= tolerance).then_some(row)
+    // Rows: runs whose vertical centres are close.
+    let mut rows: Vec<Vec<Run>> = Vec::new();
+    for run in runs {
+        let joins = rows.last().is_some_and(|row| {
+            let top = row.iter().map(|r| r.top).fold(f32::MAX, f32::min);
+            let bottom = row.iter().map(|r| r.bottom).fold(f32::MIN, f32::max);
+            let tolerance = (bottom - top).min(run.height()) * 0.5;
+            (run.centre() - (top + bottom) / 2.0).abs() <= tolerance
         });
-        match joined {
-            Some(row) => row.push(it),
-            None => rows.push(vec![it]),
+        if joins {
+            rows.last_mut().unwrap().push(run);
+        } else {
+            rows.push(vec![run]);
         }
     }
 
-    rows.into_iter()
-        .map(|mut row| {
-            row.sort_by(|a, b| a.x.total_cmp(&b.x));
-            let mut text = String::new();
-            let mut prev_right: Option<f32> = None;
-            for it in &row {
-                if let Some(right) = prev_right {
-                    let gap = it.x - right;
-                    let needs_space = !text.ends_with(' ') && !it.s.starts_with(' ');
-                    if needs_space && gap > it.h * 0.12 {
-                        text.push(' ');
-                    }
-                }
-                text.push_str(&it.s);
-                prev_right = Some(it.x + it.w);
+    let mut lines = Vec::new();
+    for mut row in rows {
+        row.sort_by(|a, b| a.left.total_cmp(&b.left));
+        // Split the row into lines whose runs don't overlap horizontally.
+        let mut split: Vec<Vec<Run>> = Vec::new();
+        for run in row {
+            match split
+                .iter_mut()
+                .find(|l| l.iter().all(|r| !r.overlaps(&run)))
+            {
+                Some(line) => line.push(run),
+                None => split.push(vec![run]),
             }
-            Line {
-                page,
-                top: row.iter().map(|r| r.y).fold(f32::MAX, f32::min),
-                bottom: row.iter().map(|r| r.y + r.h).fold(f32::MIN, f32::max),
-                left: row.iter().map(|r| r.x).fold(f32::MAX, f32::min),
-                right: row.iter().map(|r| r.x + r.w).fold(f32::MIN, f32::max),
-                text: normalize_spaces(&text),
+        }
+        split.sort_by_key(|l| l.iter().map(|r| r.first).min().unwrap_or(0));
+        // One misplaced line on top of another is recoverable; a whole paragraph
+        // collapsed onto one position is not.
+        let stacked = split.len() >= 3;
+        for runs in split {
+            let mut iter = runs.into_iter();
+            let Some(mut acc) = iter.next() else { continue };
+            for r in iter {
+                acc.push(&r.text, r.left, r.right, r.height());
+                acc.top = acc.top.min(r.top);
+                acc.bottom = acc.bottom.max(r.bottom);
             }
-        })
-        .filter(|l| !l.text.is_empty())
-        .collect()
+            let text = normalize_spaces(&acc.text);
+            if !text.is_empty() {
+                lines.push(Line {
+                    page,
+                    top: acc.top,
+                    bottom: acc.bottom,
+                    left: acc.left,
+                    right: acc.right,
+                    text,
+                    stacked,
+                });
+            }
+        }
+    }
+    lines
 }
 
 fn normalize_spaces(s: &str) -> String {
@@ -241,6 +327,65 @@ mod tests {
         let lines = build_lines(&pages);
         assert_eq!(lines.len(), 5);
         assert!(lines.iter().all(|l| l.text.starts_with("Body")));
+    }
+
+    #[test]
+    fn separates_touching_words_and_keeps_misplaced_lines_apart() {
+        let w = |s: &str, x: f32, y: f32, width: f32| RawItem {
+            s: s.into(),
+            x,
+            y,
+            w: width,
+            h: 8.0,
+        };
+        let page = RawPage {
+            width: 600.0,
+            height: 800.0,
+            // Stream order as pdf.js reports it for an OCR layer: one item per word,
+            // words touching, and a body line misplaced onto the header's row.
+            items: vec![
+                w("Question", 77.0, 26.0, 26.0),
+                w("#50", 107.0, 26.0, 11.0),
+                w("Topic", 515.0, 26.0, 19.0),
+                w("1", 534.0, 26.0, 4.0),
+                w("You", 77.0, 26.5, 14.0),
+                w("have", 91.0, 26.5, 17.0),
+                w("an", 108.0, 26.5, 9.0),
+                w("Azure", 117.0, 26.5, 20.0),
+                w("subscription.", 137.0, 26.5, 400.0),
+            ],
+        };
+        let lines = build_lines(&[page]);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["Question #50 Topic 1", "You have an Azure subscription."]
+        );
+    }
+
+    #[test]
+    fn joins_slightly_overlapping_ocr_word_boxes() {
+        let w = |s: &str, x: f32, width: f32| RawItem {
+            s: s.into(),
+            x,
+            y: 25.7,
+            w: width,
+            h: 8.8,
+        };
+        let page = RawPage {
+            width: 612.0,
+            height: 792.0,
+            items: vec![
+                w("Question", 77.4, 35.3),
+                w("#2", 107.5, 9.8),
+                w("Topic", 515.2, 21.6),
+                w("2", 532.0, 6.3),
+            ],
+        };
+        let lines = build_lines(&[page]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Question #2 Topic 2");
+        assert!(!lines[0].stacked);
     }
 
     #[test]

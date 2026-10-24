@@ -73,9 +73,11 @@ re!(
 re!(TOPIC_IN_HEADER, r"(?i)^[\s\-–—|,]*topic\s*(\d{1,3})\s*$");
 // OCR sometimes glues picture text into the header row: "Question #55 For the inbound … Topic 2".
 re!(TOPIC_AT_END, r"(?i)\btopic\s*(\d{1,3})\s*$");
+// "Topic 2 - Question Set 2". The title is required: a bare "Topic 7" is usually the
+// right-aligned part of a question header that OCR split off (and often misread).
 re!(
     TOPIC_LINE,
-    r"(?i)^\s*topic\s*(\d{1,3})\b\s*[-–—:,.]?\s*(.{0,100})$"
+    r"(?i)^\s*topic\s*(\d{1,3})\s*[-–—:,.]\s*(\S.{0,99})$"
 );
 re!(
     CORRECT_ANSWER,
@@ -93,6 +95,13 @@ re!(URL, r"https?://\S+");
 re!(
     TYPE_MARKER,
     r"(?i)^\s*(hot\s*spot|drag\s*(?:and\s*|&\s*|-\s*)?drop|simulation|lab)\s*[-–—:]?\s*$"
+);
+// A marker that OCR merged into the first line of text, possibly after a stray page
+// number: "29 DRAG DROP For a Microsoft cloud environment, …". Upper case only, so a
+// sentence like "Drag and drop the …" is not mistaken for one.
+re!(
+    TYPE_PREFIX,
+    r"^\s*[\d\W]{0,4}\s*(HOT\s*SPOT|DRAG\s*(?:AND\s*|&\s*|-\s*)?DROP)\b\s*[-–—:]?\s*(.*)$"
 );
 re!(
     AREA_MARKER,
@@ -376,18 +385,39 @@ fn parse_block(
     }
 
     // ---- question section -----------------------------------------------
+    // Holds the rest of a line whose start was a type marker ("DRAG DROP For a …").
+    let marker_rest: Line;
     let mut q: Vec<&Line> = q_lines.to_vec();
     let mut visual: Option<VisualVariant> = None;
-    if let Some(pos) = q.iter().take(3).position(|l| TYPE_MARKER.is_match(&l.text)) {
-        let marker = q[pos].text.to_lowercase();
-        visual = Some(if marker.contains("hot") {
+    let variant_of = |marker: &str| {
+        let marker = marker.to_lowercase();
+        if marker.contains("hot") {
             VisualVariant::Hotspot
         } else if marker.contains("drag") {
             VisualVariant::DragDrop
         } else {
             VisualVariant::Simulation
-        });
+        }
+    };
+    if let Some(pos) = q.iter().take(3).position(|l| TYPE_MARKER.is_match(&l.text)) {
+        visual = Some(variant_of(&q[pos].text));
         q.remove(pos);
+    } else if let Some((pos, c)) = q
+        .iter()
+        .take(3)
+        .enumerate()
+        .find_map(|(i, l)| TYPE_PREFIX.captures(&l.text).map(|c| (i, c)))
+    {
+        visual = Some(variant_of(&c[1]));
+        marker_rest = Line {
+            text: c[2].trim().to_string(),
+            ..q[pos].clone()
+        };
+        if marker_rest.text.is_empty() {
+            q.remove(pos);
+        } else {
+            q[pos] = &marker_rest;
+        }
     }
 
     let mut case_study = None;
@@ -474,10 +504,29 @@ fn parse_block(
         None => Vec::new(),
     };
 
-    let has_exhibit = matches!(
-        kind,
-        QuestionKind::Visual { .. } | QuestionKind::Dropdown { .. }
-    ) || EXHIBIT.is_match(&body)
+    // Pictures (diagrams, answer areas) naturally put several labels on one row; only
+    // sentences in the question text itself that ended up stacked mean scrambled text.
+    let text_end = q
+        .iter()
+        .position(|l| AREA_MARKER.is_match(&l.text) || OPTION.is_match(&l.text))
+        .unwrap_or(q.len());
+    let garbled = q[..text_end]
+        .iter()
+        .filter(|l| l.stacked && l.text.split_whitespace().count() >= 6)
+        .count()
+        >= 2;
+    if garbled {
+        warnings.push(
+            "The PDF's OCR text for this question is scrambled; compare with the page snapshot and fix it in the editor"
+                .into(),
+        );
+    }
+    let has_exhibit = garbled
+        || matches!(
+            kind,
+            QuestionKind::Visual { .. } | QuestionKind::Dropdown { .. }
+        )
+        || EXHIBIT.is_match(&body)
         || has_large_gap(header, q_lines, q_end, pages);
 
     ParsedQuestion {

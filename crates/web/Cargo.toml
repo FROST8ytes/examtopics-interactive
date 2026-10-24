@@ -1,0 +1,28 @@
+[package]
+name = "web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["router"] }
+dioxus-icons = { version = "0.1.0", default-features = false }
+dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
+examcore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = [
+    "Window", "Document", "Location", "History", "Storage", "Crypto",
+    "HtmlInputElement", "UrlSearchParams", "FileList", "File", "Blob", "Element", "ScrollToOptions", "ScrollBehavior",
+] }
+sha2 = "0.11.1"
+base64 = "0.23.1"
+gloo-timers = { version = "0.4.0", features = ["futures"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]

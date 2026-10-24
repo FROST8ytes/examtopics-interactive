@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.wasm binary
+*.pfb binary
+*.ttf binary

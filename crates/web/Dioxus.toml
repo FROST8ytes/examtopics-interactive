@@ -1,0 +1,5 @@
+[application]
+name = "examtopics-interactive"
+
+[web.app]
+title = "ExamTopics Interactive"

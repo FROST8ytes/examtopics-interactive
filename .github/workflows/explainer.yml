@@ -1,0 +1,32 @@
+# Drains the Claude explanation queue on a schedule using a Claude subscription
+# (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`). Optional: you can run the
+# explainer on any machine instead (`cargo run --release -p explainer`).
+name: Claude explainer
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: explainer
+  cancel-in-progress: false
+
+jobs:
+  explain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Run explainer
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cargo run --release -p explainer -- --once --concurrency 3

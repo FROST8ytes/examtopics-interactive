@@ -91,15 +91,15 @@ pub struct DropdownGroup {
     /// Statement / box label shown next to the dropdown.
     pub label: String,
     pub options: Vec<String>,
-    /// Index into `options`.
-    pub correct: usize,
+    /// Index into `options`; `None` when the PDF's answer could not be read.
+    pub correct: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DragSlot {
     pub label: String,
-    /// Index into `items`.
-    pub correct: usize,
+    /// Index into `items`; `None` when the PDF's answer could not be read.
+    pub correct: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,18 +134,39 @@ impl QuestionKind {
         }
     }
 
+    /// Whether the answer key is complete, so responses can be graded automatically.
+    /// Without it the user compares with the answer picture and grades themselves.
+    pub fn has_key(&self) -> bool {
+        match self {
+            QuestionKind::Choice { correct, .. } => !correct.is_empty(),
+            QuestionKind::Dropdown { groups } => groups.iter().all(|g| g.correct.is_some()),
+            QuestionKind::DragDrop { slots, .. } => slots.iter().all(|s| s.correct.is_some()),
+            QuestionKind::Visual { .. } => false,
+        }
+    }
+
     /// Short, human readable form of the correct answer.
     pub fn answer_summary(&self) -> String {
+        let pick = |list: &[String], i: Option<usize>| {
+            i.and_then(|i| list.get(i).cloned())
+                .unwrap_or_else(|| "?".into())
+        };
         match self {
             QuestionKind::Choice { correct, .. } => correct.join(""),
+            QuestionKind::Dropdown { groups } if groups.iter().all(|g| g.correct.is_none()) => {
+                "See answer image".into()
+            }
             QuestionKind::Dropdown { groups } => groups
                 .iter()
-                .map(|g| g.options.get(g.correct).cloned().unwrap_or_default())
+                .map(|g| pick(&g.options, g.correct))
                 .collect::<Vec<_>>()
                 .join(" / "),
+            QuestionKind::DragDrop { slots, .. } if slots.iter().all(|s| s.correct.is_none()) => {
+                "See answer image".into()
+            }
             QuestionKind::DragDrop { items, slots, .. } => slots
                 .iter()
-                .map(|s| items.get(s.correct).cloned().unwrap_or_default())
+                .map(|s| pick(items, s.correct))
                 .collect::<Vec<_>>()
                 .join(" → "),
             QuestionKind::Visual { answer_text, .. } => answer_text
@@ -208,13 +229,13 @@ pub fn grade(kind: &QuestionKind, response: &Response) -> bool {
                 && groups
                     .iter()
                     .zip(selected)
-                    .all(|(g, s)| *s == Some(g.correct))
+                    .all(|(g, s)| g.correct.is_some() && *s == g.correct)
         }
         (QuestionKind::DragDrop { items, slots, .. }, Response::DragDrop(selected)) => {
             slots.len() == selected.len()
                 && slots.iter().zip(selected).all(|(slot, s)| match s {
                     // Items with identical text are interchangeable.
-                    Some(i) => items.get(*i) == items.get(slot.correct),
+                    Some(i) => slot.correct.is_some_and(|c| items.get(*i) == items.get(c)),
                     None => false,
                 })
         }
@@ -261,12 +282,12 @@ mod tests {
                 DropdownGroup {
                     label: "x".into(),
                     options: vec!["Yes".into(), "No".into()],
-                    correct: 1,
+                    correct: Some(1),
                 },
                 DropdownGroup {
                     label: "y".into(),
                     options: vec!["Yes".into(), "No".into()],
-                    correct: 0,
+                    correct: Some(0),
                 },
             ],
         };
@@ -278,17 +299,36 @@ mod tests {
             slots: vec![
                 DragSlot {
                     label: "1".into(),
-                    correct: 0,
+                    correct: Some(0),
                 },
                 DragSlot {
                     label: "2".into(),
-                    correct: 1,
+                    correct: Some(1),
                 },
             ],
             ordered: true,
         };
         assert!(grade(&kind, &Response::DragDrop(vec![Some(2), Some(1)])));
         assert!(!grade(&kind, &Response::DragDrop(vec![Some(1), Some(0)])));
+    }
+
+    #[test]
+    fn missing_keys_never_grade_and_old_rows_still_load() {
+        let kind = QuestionKind::Dropdown {
+            groups: vec![DropdownGroup {
+                label: "x".into(),
+                options: vec!["Yes".into(), "No".into()],
+                correct: None,
+            }],
+        };
+        assert!(!kind.has_key());
+        assert!(!grade(&kind, &Response::Dropdown(vec![None])));
+        assert_eq!(kind.answer_summary(), "See answer image");
+        let old: QuestionKind = serde_json::from_str(
+            r#"{"type":"dropdown","groups":[{"label":"x","options":["Yes","No"],"correct":1}]}"#,
+        )
+        .unwrap();
+        assert!(old.has_key());
     }
 
     #[test]

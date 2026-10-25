@@ -2,13 +2,15 @@
 //! of the uploaded PDF and renders page snapshots for image-based questions.
 
 use examcore::layout::RawPage;
-use examcore::parse::Region;
+use examcore::parse::{Picture, Region};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r##"
 const BASE = "/vendor/pdfjs/";
 let pdfjs = null;
 let doc = null;
+// The loading task owns the document; destroying it frees the worker's copy.
+let task = null;
 const cache = new Map();
 
 async function lib() {
@@ -24,17 +26,42 @@ export async function pdf_open(inputId) {
   const file = el && el.files && el.files[0];
   if (!file) throw new Error("No file selected");
   const pdf = await lib();
-  if (doc) { await doc.destroy(); doc = null; }
+  if (task) { await task.destroy(); task = null; doc = null; }
   cache.clear();
   const data = new Uint8Array(await file.arrayBuffer());
-  doc = await pdf.getDocument({
+  task = pdf.getDocument({
     data,
     wasmUrl: BASE + "wasm/",
     iccUrl: BASE + "wasm/",
     standardFontDataUrl: BASE + "standard_fonts/",
     isEvalSupported: false,
-  }).promise;
+  });
+  doc = await task.promise;
   return JSON.stringify({ pages: doc.numPages, name: file.name, size: file.size });
+}
+
+// Where pictures are painted: follow the transformation matrix through the
+// page's drawing operations.
+async function pageImages(page, vp) {
+  const O = pdfjs.OPS;
+  const ops = await page.getOperatorList();
+  const images = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    if (fn === O.save) stack.push(ctm);
+    else if (fn === O.restore) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+    else if (fn === O.transform) ctm = pdfjs.Util.transform(ctm, ops.argsArray[i]);
+    else if (fn === O.paintImageXObject || fn === O.paintInlineImageXObject || fn === O.paintImageMaskXObject) {
+      const m = pdfjs.Util.transform(vp.transform, ctm);
+      const xs = [m[4], m[4] + m[0], m[4] + m[2], m[4] + m[0] + m[2]];
+      const ys = [m[5], m[5] + m[1], m[5] + m[3], m[5] + m[1] + m[3]];
+      const x = Math.min(...xs), y = Math.min(...ys);
+      images.push({ x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y });
+    }
+  }
+  return images;
 }
 
 export async function pdf_page_text(index) {
@@ -48,8 +75,14 @@ export async function pdf_page_text(index) {
     const h = Math.hypot(tx[2], tx[3]) || it.height || 1;
     items.push({ s: it.str, x: tx[4], y: tx[5] - h, w: it.width, h });
   }
+  let images = [];
+  try {
+    images = await pageImages(page, vp);
+  } catch (e) {
+    console.warn("Couldn't read picture positions of page", index + 1, e);
+  }
   page.cleanup();
-  return JSON.stringify({ width: vp.width, height: vp.height, items });
+  return JSON.stringify({ width: vp.width, height: vp.height, items, images });
 }
 
 async function renderPage(index, scale) {
@@ -93,8 +126,20 @@ export async function pdf_snapshot(regionsJson, scale, quality) {
   return [new Uint8Array(await blob.arrayBuffer()), blob.type];
 }
 
+export async function pdf_pixels(page, x, y, w, h, scale) {
+  const canvas = await renderPage(page, scale);
+  const sx = Math.max(0, Math.round(x * scale));
+  const sy = Math.max(0, Math.round(y * scale));
+  const sw = Math.min(canvas.width - sx, Math.round(w * scale));
+  const sh = Math.min(canvas.height - sy, Math.round(h * scale));
+  if (sw < 2 || sh < 2) return null;
+  const data = canvas.getContext("2d").getImageData(sx, sy, sw, sh);
+  return [new Uint8Array(data.data.buffer), sw, sh];
+}
+
 export async function pdf_close() {
-  if (doc) await doc.destroy();
+  if (task) await task.destroy();
+  task = null;
   doc = null;
   cache.clear();
 }
@@ -106,6 +151,15 @@ extern "C" {
     async fn js_page_text(index: u32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = pdf_snapshot)]
     async fn js_snapshot(regions: &str, scale: f64, quality: f64) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = pdf_pixels)]
+    async fn js_pixels(
+        page: u32,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        scale: f64,
+    ) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = pdf_close)]
     async fn js_close() -> Result<JsValue, JsValue>;
 }
@@ -166,6 +220,47 @@ pub async fn snapshot(regions: &[Region], scale: f64) -> Result<Option<Snapshot>
     Ok(Some(Snapshot {
         bytes,
         content_type,
+    }))
+}
+
+/// A rendered picture as RGBA pixels.
+pub struct Pixels {
+    pub rgba: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Pixels {
+    pub fn image(&self) -> examcore::marks::Image<'_> {
+        examcore::marks::Image {
+            width: self.width,
+            height: self.height,
+            rgba: &self.rgba,
+        }
+    }
+}
+
+/// Renders a picture of the PDF (at `scale` × its size in points).
+pub async fn pixels(picture: &Picture, scale: f64) -> Result<Option<Pixels>, String> {
+    let r = picture.rect;
+    let v = js_pixels(
+        picture.page,
+        r.x as f64,
+        r.y as f64,
+        r.w as f64,
+        r.h as f64,
+        scale,
+    )
+    .await
+    .map_err(js_err)?;
+    if v.is_null() || v.is_undefined() {
+        return Ok(None);
+    }
+    let arr = js_sys::Array::from(&v);
+    Ok(Some(Pixels {
+        rgba: js_sys::Uint8Array::new(&arr.get(0)).to_vec(),
+        width: arr.get(1).as_f64().unwrap_or(0.0) as usize,
+        height: arr.get(2).as_f64().unwrap_or(0.0) as usize,
     }))
 }
 

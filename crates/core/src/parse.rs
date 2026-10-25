@@ -21,7 +21,8 @@
 //! paragraphs. Everything that cannot be represented as text (exhibits, hot
 //! areas) is captured through page regions so the UI can show snapshots.
 
-use crate::layout::{Line, PageInfo, RawPage, build_lines};
+use crate::area;
+use crate::layout::{Line, PageInfo, RawPage, Rect, build_lines};
 use crate::model::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -35,12 +36,25 @@ pub struct Region {
     pub bottom: f32,
 }
 
+/// A picture drawn on a page.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Picture {
+    pub page: u32,
+    pub rect: Rect,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParsedQuestion {
     pub question: Question,
     pub question_regions: Vec<Region>,
     pub answer_regions: Vec<Region>,
     pub warnings: Vec<String>,
+    /// The picture shown after "Correct Answer:" (hotspot / drag & drop answers).
+    #[serde(default)]
+    pub answer_picture: Option<Picture>,
+    /// The unmarked answer area in the question, when it is a picture.
+    #[serde(default)]
+    pub question_picture: Option<Picture>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +144,18 @@ re!(
     r"(?i)^\s*(statements?|yes|no|yes\s+no|answer\s*area)\s*$"
 );
 re!(TRAILING_YES_NO, r"(?i)\s+yes\s+no\s*$");
+re!(ANSWER_AREA_ONLY, r"(?i)^\s*answer\s*area\s*$");
+
+/// "Hot Area:", "Answer Area", "Select and Place:" headings. A sentence that wraps
+/// before "answer area." is not one, so the heading must be capitalised.
+fn is_area_marker(text: &str) -> bool {
+    AREA_MARKER.is_match(text)
+        && text
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(char::is_uppercase)
+}
 
 /// Parses the text layer of an ExamTopics PDF.
 pub fn parse_pages(pages: &[RawPage]) -> ParseOutput {
@@ -138,6 +164,7 @@ pub fn parse_pages(pages: &[RawPage]) -> ParseOutput {
         .map(|p| PageInfo {
             width: p.width,
             height: p.height,
+            images: p.images.clone(),
         })
         .collect();
     let lines = build_lines(pages);
@@ -372,6 +399,32 @@ fn parse_block(
         }
     };
 
+    // The answer picture sits next to the "Correct Answer:" label and usually starts
+    // above it, so OCR puts its first rows before the label. They belong to the answer.
+    let answer_picture = a_lines
+        .first()
+        .and_then(|ca| find_answer_picture(ca, pages));
+    let in_answer_picture = |l: &Line| {
+        answer_picture.is_some_and(|p| {
+            p.page == l.page && p.rect.contains((l.left + l.right) / 2.0, l.centre())
+        })
+    };
+    let mut picture_lines: Vec<&Line> = body_lines
+        .iter()
+        .copied()
+        .filter(|l| in_answer_picture(l))
+        .collect();
+    let q_lines: Vec<&Line> = q_lines
+        .iter()
+        .copied()
+        .filter(|l| !in_answer_picture(l))
+        .collect();
+    // Where the answer starts: the top of its picture, or the "Correct Answer:" line.
+    let mut a_start = match (answer_picture, a_lines.first()) {
+        (Some(p), Some(ca)) if p.page == ca.page && p.rect.y < ca.top => Some((p.page, p.rect.y)),
+        (_, ca) => ca.map(|l| (l.page, l.top)),
+    };
+
     // ---- answer section -------------------------------------------------
     let answer = AnswerSection::parse(a_lines);
     let keys = a_lines
@@ -387,7 +440,7 @@ fn parse_block(
     // ---- question section -----------------------------------------------
     // Holds the rest of a line whose start was a type marker ("DRAG DROP For a …").
     let marker_rest: Line;
-    let mut q: Vec<&Line> = q_lines.to_vec();
+    let mut q: Vec<&Line> = q_lines;
     let mut visual: Option<VisualVariant> = None;
     let variant_of = |marker: &str| {
         let marker = marker.to_lowercase();
@@ -409,10 +462,7 @@ fn parse_block(
         .find_map(|(i, l)| TYPE_PREFIX.captures(&l.text).map(|c| (i, c)))
     {
         visual = Some(variant_of(&c[1]));
-        marker_rest = Line {
-            text: c[2].trim().to_string(),
-            ..q[pos].clone()
-        };
+        marker_rest = q[pos].with_text(c[2].trim().to_string());
         if marker_rest.text.is_empty() {
             q.remove(pos);
         } else {
@@ -431,7 +481,7 @@ fn parse_block(
         q.drain(..=qpos);
     }
 
-    let area_idx = q.iter().position(|l| AREA_MARKER.is_match(&l.text));
+    let mut area_idx = q.iter().position(|l| is_area_marker(&l.text));
     if let Some(i) = area_idx
         && visual.is_none()
         && find_options(&q).is_none()
@@ -443,15 +493,46 @@ fn parse_block(
             VisualVariant::Hotspot
         });
     }
+    // Drag & drop panes are headed "Methodology  Answer Area" on one row.
+    if area_idx.is_none() && visual == Some(VisualVariant::DragDrop) {
+        area_idx = q.iter().position(|l| area::is_header(&l.text));
+    }
+    // Without picture positions, the answer picture starts at a second "Answer Area".
+    if answer_picture.is_none()
+        && visual.is_some()
+        && let Some(i) = area_idx
+        && let Some(j) = (i + 2..q.len()).find(|&j| ANSWER_AREA_ONLY.is_match(&q[j].text))
+    {
+        a_start = Some((q[j].page, q[j].top - 6.0));
+        picture_lines.splice(0..0, q.drain(j..));
+    }
+    let question_picture = area_idx
+        .and_then(|i| q.get(i + 1).or(q.get(i)))
+        .and_then(|l| find_picture_around(l, pages));
+    // Text before the answer area; exhibits are only looked for here.
+    let body_end = match visual {
+        Some(_) => area_idx.unwrap_or(q.len()),
+        None => q.len(),
+    };
 
     let (body, kind) = match visual {
         Some(variant) => {
-            let (body_part, area_part) = match area_idx {
-                Some(i) => (&q[..i], &q[i + 1..]),
-                None => (&q[..], &q[q.len()..]),
+            let body = join_lines(&q[..body_end]);
+            let area_part: &[&Line] = match (area_idx, variant) {
+                // Drag & drop needs the header row to tell the panes apart.
+                (Some(i), VisualVariant::DragDrop) => &q[i..],
+                (Some(i), _) => &q[i + 1..],
+                (None, _) => &[],
             };
-            let body = join_lines(body_part);
-            let kind = build_visual(variant, &body, area_part, &answer, &mut warnings);
+            let kind = build_visual(
+                variant,
+                &body,
+                area_part,
+                &picture_lines,
+                a_lines,
+                &answer,
+                &mut warnings,
+            );
             (body, kind)
         }
         None => match find_options(&q) {
@@ -484,7 +565,7 @@ fn parse_block(
     };
 
     // ---- regions and exhibit detection --------------------------------------
-    let q_end = a_lines.first().map(|l| (l.page, l.top));
+    let q_end = a_start;
     let a_end = answer
         .community_line
         .map(|l| (l.page, l.top))
@@ -495,20 +576,18 @@ fn parse_block(
         q_end.or(a_end).unwrap_or((header.page, header.bottom)),
         pages,
     );
-    let answer_regions = match a_lines.first() {
-        Some(first) => regions(
-            (first.page, first.top),
-            a_end.unwrap_or((first.page, first.bottom)),
-            pages,
-        ),
-        None => Vec::new(),
+    let answer_regions = match (a_start, a_lines.first()) {
+        (Some(start), Some(first)) => {
+            regions(start, a_end.unwrap_or((first.page, first.bottom)), pages)
+        }
+        _ => Vec::new(),
     };
 
     // Pictures (diagrams, answer areas) naturally put several labels on one row; only
     // sentences in the question text itself that ended up stacked mean scrambled text.
     let text_end = q
         .iter()
-        .position(|l| AREA_MARKER.is_match(&l.text) || OPTION.is_match(&l.text))
+        .position(|l| is_area_marker(&l.text) || OPTION.is_match(&l.text))
         .unwrap_or(q.len());
     let garbled = q[..text_end]
         .iter()
@@ -521,13 +600,12 @@ fn parse_block(
                 .into(),
         );
     }
+    // Interactive answer areas don't need the picture; exhibits in the text do.
+    let body_bottom = q.get(body_end).map(|l| (l.page, l.top)).or(q_end);
     let has_exhibit = garbled
-        || matches!(
-            kind,
-            QuestionKind::Visual { .. } | QuestionKind::Dropdown { .. }
-        )
+        || matches!(kind, QuestionKind::Visual { .. })
         || EXHIBIT.is_match(&body)
-        || has_large_gap(header, q_lines, q_end, pages);
+        || has_large_gap(header, &q[..body_end], body_bottom, pages);
 
     ParsedQuestion {
         question: Question {
@@ -545,7 +623,53 @@ fn parse_block(
         question_regions,
         answer_regions,
         warnings,
+        answer_picture,
+        question_picture,
     }
+}
+
+/// The answer picture: beside the "Correct Answer:" label (overlapping its row, to the
+/// right of it), or right below it.
+fn find_answer_picture(ca: &Line, pages: &[PageInfo]) -> Option<Picture> {
+    let page = pages.get(ca.page as usize)?;
+    let usable = |r: &&Rect| r.w <= page.width * 0.85 && r.w >= 12.0 && r.h >= 12.0;
+    let area = |r: &&Rect| r.w * r.h;
+    let beside = page
+        .images
+        .iter()
+        .filter(usable)
+        .filter(|r| r.x >= ca.left + 25.0 && r.y <= ca.bottom + 2.0 && r.bottom() >= ca.top - 2.0)
+        .max_by(|a, b| area(a).total_cmp(&area(b)));
+    let below = || {
+        page.images
+            .iter()
+            .filter(usable)
+            .filter(|r| r.x >= ca.left - 6.0 && r.y >= ca.top - 1.0 && r.y <= ca.bottom + 25.0)
+            .max_by(|a, b| area(a).total_cmp(&area(b)))
+    };
+    beside.or_else(below).map(|r| Picture {
+        page: ca.page,
+        rect: *r,
+    })
+}
+
+/// The smallest picture that contains `line` and starts just above it, skipping the
+/// page-sized pictures that make up the layout.
+fn find_picture_around(line: &Line, pages: &[PageInfo]) -> Option<Picture> {
+    let page = pages.get(line.page as usize)?;
+    page.images
+        .iter()
+        .filter(|r| {
+            r.w >= 12.0
+                && r.h >= 12.0
+                && r.contains((line.left + line.right) / 2.0, line.centre())
+                && r.y >= line.top - 60.0
+        })
+        .min_by(|a, b| (a.w * a.h).total_cmp(&(b.w * b.h)))
+        .map(|r| Picture {
+            page: line.page,
+            rect: *r,
+        })
 }
 
 struct AnswerSection<'a> {
@@ -738,7 +862,9 @@ fn expected_count(body: &str) -> Option<usize> {
 fn build_visual(
     variant: VisualVariant,
     body: &str,
-    area: &[&Line],
+    area_lines: &[&Line],
+    picture: &[&Line],
+    answer_lines: &[&Line],
     answer: &AnswerSection,
     warnings: &mut Vec<String>,
 ) -> QuestionKind {
@@ -755,7 +881,7 @@ fn build_visual(
             .collect();
         boxes.sort_by_key(|b| b.0);
         boxes.dedup_by_key(|b| b.0);
-        let statements: Vec<String> = area
+        let statements: Vec<String> = area_lines
             .iter()
             .map(|l| TRAILING_YES_NO.replace(&l.text, "").trim().to_string())
             .filter(|s| !s.is_empty() && !YES_NO_ONLY.is_match(s))
@@ -768,7 +894,7 @@ fn build_visual(
                     .map(|(label, (_, yes))| DropdownGroup {
                         label,
                         options: vec!["Yes".into(), "No".into()],
-                        correct: if yes { 0 } else { 1 },
+                        correct: Some(if yes { 0 } else { 1 }),
                     })
                     .collect(),
             };
@@ -780,6 +906,53 @@ fn build_visual(
                 statements.len()
             ));
         }
+        return QuestionKind::Visual {
+            variant,
+            answer_text: answer.text_opt(),
+        };
+    }
+
+    let boxes = area::box_answers(answer_lines);
+    match variant {
+        VisualVariant::Hotspot => {
+            if let Some(mut groups) = area::dropdown_groups(area_lines) {
+                // Labels OCR lost in the question may be readable in the answer picture.
+                if let Some(answer_groups) = area::dropdown_groups(picture)
+                    && answer_groups.len() == groups.len()
+                {
+                    for (g, a) in groups.iter_mut().zip(answer_groups) {
+                        if g.label.starts_with("Box ") && !a.label.starts_with("Box ") {
+                            g.label = a.label;
+                        }
+                    }
+                }
+                // Otherwise the key is read from the answer picture on import.
+                area::key_dropdowns(&mut groups, &boxes);
+                return QuestionKind::Dropdown { groups };
+            }
+        }
+        VisualVariant::DragDrop => {
+            if let Some(mut dd) = area::drag_drop(area_lines, body) {
+                if !area::key_drag_drop(&mut dd, &boxes, picture) {
+                    warnings.push(
+                        "The answer couldn't be read from the PDF's text; answers are checked against the answer picture"
+                            .into(),
+                    );
+                }
+                return QuestionKind::DragDrop {
+                    items: dd.items,
+                    slots: dd.slots,
+                    ordered: dd.ordered,
+                };
+            }
+        }
+        _ => {}
+    }
+    if area_lines.is_empty() && picture.is_empty() {
+        warnings.push(
+            "The PDF has no readable text for this question's answer area (the picture may be missing from the PDF)"
+                .into(),
+        );
     }
     QuestionKind::Visual {
         variant,
@@ -863,7 +1036,9 @@ fn has_large_gap(
     heights.sort_by(f32::total_cmp);
     let median = heights.get(heights.len() / 2).copied().unwrap_or(10.0);
     let threshold = (median * 4.0).max(45.0);
-    all.windows(2).any(|w| {
+    // The space under the header held the HOTSPOT / DRAG DROP marker (already removed),
+    // not a picture.
+    all.windows(2).skip(1).any(|w| {
         let (a, b) = (w[0], w[1]);
         if a.0 == b.0 {
             b.1 - a.2 > threshold

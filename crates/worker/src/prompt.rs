@@ -280,7 +280,7 @@ fn convert(i: Interactive) -> Option<QuestionKind> {
                 .map(|g| DropdownGroup {
                     label: g.label,
                     options: g.options,
-                    correct: g.correct_index as usize,
+                    correct: Some(g.correct_index as usize),
                 })
                 .collect();
             (!groups.is_empty()).then_some(QuestionKind::Dropdown { groups })
@@ -293,7 +293,7 @@ fn convert(i: Interactive) -> Option<QuestionKind> {
                 .filter(|s| s.correct_item_index >= 0 && (s.correct_item_index as usize) < n)
                 .map(|s| DragSlot {
                     label: s.label,
-                    correct: s.correct_item_index as usize,
+                    correct: Some(s.correct_item_index as usize),
                 })
                 .collect();
             (n >= 2 && !slots.is_empty()).then_some(QuestionKind::DragDrop {

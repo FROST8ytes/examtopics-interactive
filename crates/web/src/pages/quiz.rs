@@ -125,6 +125,8 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
     let mut jobs = use_signal(|| data.jobs.clone());
     let mut overrides = use_signal(HashMap::<String, QuestionRow>::new);
     let mut saving = use_signal(|| false);
+    // Question whose answer is being compared with the answer picture (no answer key).
+    let mut comparing = use_signal(|| None::<String>);
 
     let current = {
         let base = &questions[pos().min(total - 1)];
@@ -194,12 +196,13 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
         });
     }
 
+    // `self_grade` is the user's own verdict, for questions without an answer key.
     let submit = {
         let current = current.clone();
-        move |resp: Response| {
+        move |resp: Response, self_grade: Option<bool>| {
             let current = current.clone();
             async move {
-                let ok = grade(&current.data.kind, &resp);
+                let ok = self_grade.unwrap_or_else(|| grade(&current.data.kind, &resp));
                 saving.set(true);
                 let next_pos = (pos() + 1).min(total - 1) as i32;
                 let res = data::record_answer(&current.id, &resp, ok, next_pos).await;
@@ -226,6 +229,7 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                     },
                 );
                 drafts.write().remove(&current.id);
+                comparing.set(None);
                 revealed.write().insert(current.id.clone());
                 // Answers only queue an explanation for allowlisted users (see record_answer).
                 if can_explain
@@ -310,6 +314,7 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
         move |_| {
             revealed.write().remove(&qid);
             drafts.write().remove(&qid);
+            comparing.set(None);
         }
     };
 
@@ -324,6 +329,8 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
     };
     let next_unanswered_idx = next_unanswered();
     let is_visual = matches!(current.data.kind, QuestionKind::Visual { .. });
+    let has_key = current.data.kind.has_key();
+    let is_comparing = comparing.read().as_deref() == Some(qid.as_str());
     let complete = response.is_complete(&current.data.kind);
     let score_kind: &'static str = if percent(correct, answered) >= 70 {
         "ok"
@@ -423,12 +430,22 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                                     row: current.clone(),
                                     images: data.images.clone(),
                                     response: response.clone(),
-                                    checked: is_revealed,
+                                    checked: is_revealed || is_comparing,
+                                    comparing: is_comparing && !is_revealed,
                                     on_change: {
                                         let qid = qid.clone();
                                         move |r: Response| { drafts.write().insert(qid.clone(), r); }
                                     },
-                                    on_self_grade: move |ok: bool| submit_self(Response::SelfGraded(ok)),
+                                    on_self_grade: {
+                                        let response = response.clone();
+                                        move |ok: bool| {
+                                            if is_visual {
+                                                submit_self(Response::SelfGraded(ok), None)
+                                            } else {
+                                                submit_self(response.clone(), Some(ok))
+                                            }
+                                        }
+                                    },
                                 }
                                 if is_revealed {
                                     if let Some(r) = &result {
@@ -438,7 +455,7 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                                                     if r.is_correct { "Correct!" } else { "Not quite." }
                                                     if r.attempts > 1 { span { class: "muted small", " (attempt {r.attempts})" } }
                                                 }
-                                                if !r.is_correct {
+                                                if !r.is_correct && has_key {
                                                     span { class: "small", "Correct answer: {current.data.kind.answer_summary()}" }
                                                 }
                                             }
@@ -466,6 +483,8 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                                                 onclick: move |_| pos.set((pos() + 1).min(total - 1)),
                                                 "Next" ArrowRight { size: "16px" }
                                             }
+                                        } else if is_comparing {
+                                            Button { variant: ButtonVariant::Ghost, onclick: move |_| comparing.set(None), "Change my answer" }
                                         } else if !is_visual {
                                             Button {
                                                 variant: ButtonVariant::Ghost,
@@ -473,14 +492,26 @@ fn QuizInner(data: Loaded, start: usize) -> Element {
                                                 onclick: move |_| pos.set((pos() + 1).min(total - 1)),
                                                 "Skip"
                                             }
-                                            Button {
-                                                disabled: !complete || saving(),
-                                                onclick: {
-                                                    let response = response.clone();
-                                                    let submit_check = submit_check.clone();
-                                                    move |_| submit_check(response.clone())
-                                                },
-                                                "Check answer"
+                                            if has_key {
+                                                Button {
+                                                    disabled: !complete || saving(),
+                                                    onclick: {
+                                                        let response = response.clone();
+                                                        let submit_check = submit_check.clone();
+                                                        move |_| submit_check(response.clone(), None)
+                                                    },
+                                                    "Check answer"
+                                                }
+                                            } else {
+                                                // The PDF's key couldn't be read: compare with its answer picture.
+                                                Button {
+                                                    disabled: !complete || saving(),
+                                                    onclick: {
+                                                        let qid = qid.clone();
+                                                        move |_| comparing.set(Some(qid.clone()))
+                                                    },
+                                                    "Compare with answer"
+                                                }
                                             }
                                         } else {
                                             Button {

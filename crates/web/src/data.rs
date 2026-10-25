@@ -255,6 +255,17 @@ pub async fn request_explanations(question_ids: &[String], force: bool) -> Resul
     Ok(total)
 }
 
+/// Queues explanations for every question matching a PostgREST filter
+/// (`certification_id=eq.…` or `set_id=eq.…`). Already explained questions are skipped.
+pub async fn request_explanations_where(filter: &str) -> Result<i64> {
+    #[derive(Deserialize)]
+    struct Id {
+        id: String,
+    }
+    let ids: Vec<Id> = db::select("questions", &format!("select=id&{filter}")).await?;
+    request_explanations(&ids.into_iter().map(|i| i.id).collect::<Vec<_>>(), false).await
+}
+
 // ---- editing ----------------------------------------------------------------------
 
 #[derive(Serialize)]

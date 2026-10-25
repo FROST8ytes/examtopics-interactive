@@ -11,6 +11,32 @@ pub struct RawPage {
     pub width: f32,
     pub height: f32,
     pub items: Vec<RawItem>,
+    /// Where pictures are drawn on the page (same coordinates as the items).
+    #[serde(default)]
+    pub images: Vec<Rect>,
+}
+
+/// An axis-aligned box in PDF points, origin top-left.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
+
+    pub fn right(&self) -> f32 {
+        self.x + self.w
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x <= self.right() && y >= self.y && y <= self.bottom()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,19 +63,48 @@ pub struct Line {
     /// Several lines of the OCR layer were stacked on this one position, so the
     /// reading order (and even word order) cannot be trusted.
     pub stacked: bool,
+    /// Runs of closely spaced words, left to right. Pictures put several of them
+    /// on one line ("Data classification    Verify explicitly").
+    pub spans: Vec<Span>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub left: f32,
+    pub right: f32,
+    pub text: String,
 }
 
 impl Line {
     pub fn height(&self) -> f32 {
         (self.bottom - self.top).max(1.0)
     }
+
+    pub fn centre(&self) -> f32 {
+        (self.top + self.bottom) / 2.0
+    }
+
+    /// A line with a single span covering all of its text.
+    pub fn with_text(&self, text: String) -> Line {
+        Line {
+            spans: vec![Span {
+                left: self.left,
+                right: self.right,
+                text: text.clone(),
+            }],
+            text,
+            ..self.clone()
+        }
+    }
 }
 
-/// Page geometry needed to cut snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Page geometry needed to cut snapshots and find pictures.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PageInfo {
     pub width: f32,
     pub height: f32,
+    #[serde(default)]
+    pub images: Vec<Rect>,
 }
 
 /// Fraction of the page height treated as header / footer band.
@@ -183,6 +238,15 @@ fn page_lines(page: u32, raw: &RawPage) -> Vec<Line> {
         // collapsed onto one position is not.
         let stacked = split.len() >= 3;
         for runs in split {
+            let spans: Vec<Span> = runs
+                .iter()
+                .map(|r| Span {
+                    left: r.left,
+                    right: r.right,
+                    text: normalize_spaces(&r.text),
+                })
+                .filter(|s| !s.text.is_empty())
+                .collect();
             let mut iter = runs.into_iter();
             let Some(mut acc) = iter.next() else { continue };
             for r in iter {
@@ -200,6 +264,7 @@ fn page_lines(page: u32, raw: &RawPage) -> Vec<Line> {
                     right: acc.right,
                     text,
                     stacked,
+                    spans,
                 });
             }
         }
@@ -299,6 +364,7 @@ mod tests {
         let page = RawPage {
             width: 600.0,
             height: 800.0,
+            images: Vec::new(),
             items: vec![
                 item("world", 40.0, 101.0),
                 item("Hello", 10.0, 100.0),
@@ -317,6 +383,7 @@ mod tests {
             .map(|i| RawPage {
                 width: 600.0,
                 height: 800.0,
+                images: Vec::new(),
                 items: vec![
                     item("ExamTopics - Free Questions", 10.0, 10.0),
                     item(&format!("Body {i}"), 10.0, 300.0),
@@ -341,6 +408,7 @@ mod tests {
         let page = RawPage {
             width: 600.0,
             height: 800.0,
+            images: Vec::new(),
             // Stream order as pdf.js reports it for an OCR layer: one item per word,
             // words touching, and a body line misplaced onto the header's row.
             items: vec![
@@ -375,6 +443,7 @@ mod tests {
         let page = RawPage {
             width: 612.0,
             height: 792.0,
+            images: Vec::new(),
             items: vec![
                 w("Question", 77.4, 35.3),
                 w("#2", 107.5, 9.8),
@@ -394,6 +463,7 @@ mod tests {
             .map(|i| RawPage {
                 width: 600.0,
                 height: 800.0,
+                images: Vec::new(),
                 items: vec![
                     item(&format!("Question #{} Topic 1", i + 1), 10.0, 20.0),
                     item(&format!("Body {i}"), 10.0, 300.0),

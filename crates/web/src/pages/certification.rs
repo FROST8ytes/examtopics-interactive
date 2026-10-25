@@ -3,12 +3,11 @@ use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::components::card::*;
 use crate::data::{self, Certification, SetStats};
-use crate::supabase::db;
+use crate::supabase::ApiError;
 use crate::ui::{ErrorState, Loading, Meter, percent};
 use dioxus::prelude::*;
 use dioxus_icons::lucide::{Play, RotateCcw, Sparkles, Trash2};
-use dioxus_primitives::toast::{ToastOptions, use_toast};
-use serde::Deserialize;
+use dioxus_primitives::toast::{ToastOptions, Toasts, use_toast};
 
 #[derive(Clone, PartialEq)]
 struct Loaded {
@@ -33,6 +32,25 @@ async fn load(id: String) -> Result<Loaded, String> {
         can_edit,
         can_explain,
     })
+}
+
+fn queued_toast(toast: Toasts, result: Result<i64, ApiError>) {
+    match result {
+        Ok(0) => toast.info(
+            "Nothing to queue".into(),
+            ToastOptions::new()
+                .description("Every question already has an explanation or is in the queue."),
+        ),
+        Ok(n) => toast.success(
+            format!("Queued {n} explanation{}", if n == 1 { "" } else { "s" }),
+            ToastOptions::new()
+                .description("The explainer worker processes them in the background."),
+        ),
+        Err(e) => toast.error(
+            "Couldn't queue explanations".into(),
+            ToastOptions::new().description(e.to_string()),
+        ),
+    }
 }
 
 pub fn confirm(message: &str) -> bool {
@@ -65,38 +83,12 @@ pub fn CertificationPage(id: String) -> Element {
         move |_| {
             let cert_id = cert_id.clone();
             async move {
-                #[derive(Deserialize)]
-                struct Id {
-                    id: String,
-                }
                 busy.set(true);
-                let ids: Result<Vec<Id>, _> = db::select(
-                    "questions",
-                    &format!("select=id&certification_id=eq.{cert_id}"),
-                )
-                .await;
-                let result = match ids {
-                    Ok(ids) => {
-                        data::request_explanations(
-                            &ids.into_iter().map(|i| i.id).collect::<Vec<_>>(),
-                            false,
-                        )
-                        .await
-                    }
-                    Err(e) => Err(e),
-                };
+                let result =
+                    data::request_explanations_where(&format!("certification_id=eq.{cert_id}"))
+                        .await;
                 busy.set(false);
-                match result {
-                    Ok(n) => toast.success(
-                        format!("Queued {n} explanations"),
-                        ToastOptions::new()
-                            .description("The explainer worker processes them in the background."),
-                    ),
-                    Err(e) => toast.error(
-                        "Couldn't queue explanations".into(),
-                        ToastOptions::new().description(e.to_string()),
-                    ),
-                }
+                queued_toast(toast, result);
             }
         }
     };
@@ -163,7 +155,7 @@ pub fn CertificationPage(id: String) -> Element {
             Meter { total, answered, correct }
             div { class: "stack",
                 for s in l.stats.iter() {
-                    SetCard { key: "{s.set_id}", stats: s.clone(), on_reset: move |_| loaded.restart() }
+                    SetCard { key: "{s.set_id}", stats: s.clone(), can_explain: l.can_explain, on_reset: move |_| loaded.restart() }
                 }
             }
         }
@@ -171,8 +163,21 @@ pub fn CertificationPage(id: String) -> Element {
 }
 
 #[component]
-fn SetCard(stats: SetStats, on_reset: EventHandler<()>) -> Element {
+fn SetCard(stats: SetStats, can_explain: bool, on_reset: EventHandler<()>) -> Element {
     let toast = use_toast();
+    let mut queuing = use_signal(|| false);
+    let explain_set = {
+        let set_id = stats.set_id.clone();
+        move |_| {
+            let set_id = set_id.clone();
+            async move {
+                queuing.set(true);
+                let result = data::request_explanations_where(&format!("set_id=eq.{set_id}")).await;
+                queuing.set(false);
+                queued_toast(toast, result);
+            }
+        }
+    };
     let finished = stats.answered >= stats.question_count && stats.question_count > 0;
     let started = stats.answered > 0 || stats.current_position.is_some();
     let resume = stats
@@ -191,6 +196,16 @@ fn SetCard(stats: SetStats, on_reset: EventHandler<()>) -> Element {
                 }
                 CardAction {
                     div { class: "row", style: "gap:.4rem",
+                        if can_explain {
+                            Button {
+                                size: ButtonSize::Sm,
+                                variant: ButtonVariant::Ghost,
+                                title: "Explain this set with Claude",
+                                disabled: queuing(),
+                                onclick: explain_set,
+                                Sparkles { size: "14px" }
+                            }
+                        }
                         if started {
                             Button {
                                 size: ButtonSize::Sm,

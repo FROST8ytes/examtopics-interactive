@@ -21,8 +21,12 @@ pub fn QuestionView(
     images: HashMap<String, String>,
     response: Response,
     checked: bool,
+    /// The user has answered a question without an answer key and is comparing their
+    /// answer with the answer picture.
+    #[props(default)]
+    comparing: bool,
     on_change: EventHandler<Response>,
-    /// Visual questions grade themselves through the self-assessment buttons.
+    /// Questions without an answer key are graded by the user (self-assessment buttons).
     on_self_grade: EventHandler<bool>,
 ) -> Element {
     let q = row.data.clone();
@@ -40,6 +44,8 @@ pub fn QuestionView(
         .and_then(|p| images.get(p))
         .cloned();
     let is_visual = matches!(q.kind, QuestionKind::Visual { .. });
+    // Interactive, but the PDF's key couldn't be read: the answer picture is the key.
+    let compare_with_picture = !is_visual && !q.kind.has_key() && (checked || comparing);
     let show_question_img = q.has_exhibit || is_visual || show_original();
 
     rsx! {
@@ -102,6 +108,25 @@ pub fn QuestionView(
                         on_self_grade,
                     }
                 },
+            }
+            if compare_with_picture {
+                div { class: "stack-sm",
+                    h3 { "Official answer" }
+                    if let Some(url) = &answer_img {
+                        div { class: "snapshot",
+                            img { src: "{url}", alt: "Correct answer", loading: "lazy" }
+                        }
+                    } else {
+                        p { class: "muted small", "No answer picture was saved for this question." }
+                    }
+                    if comparing {
+                        div { class: "row",
+                            span { class: "small bold", "Does your answer match?" }
+                            Button { variant: ButtonVariant::Outline, onclick: move |_| on_self_grade.call(true), ThumbsUp { size: "16px" } "Yes" }
+                            Button { variant: ButtonVariant::Outline, onclick: move |_| on_self_grade.call(false), ThumbsDown { size: "16px" } "No" }
+                        }
+                    }
+                }
             }
             if !is_visual && question_img.is_some() && !q.has_exhibit {
                 div {
@@ -216,10 +241,10 @@ fn DropdownInput(
             for (gi, group) in groups.iter().enumerate() {
                 {
                     let current = selected[gi];
-                    let state = match (checked, current == Some(group.correct)) {
-                        (false, _) => "",
-                        (true, true) => "correct",
-                        (true, false) => "incorrect",
+                    let state = match (checked, group.correct) {
+                        (true, Some(c)) if current == Some(c) => "correct",
+                        (true, Some(_)) => "incorrect",
+                        _ => "",
                     };
                     let selected = selected.clone();
                     rsx! {
@@ -237,9 +262,9 @@ fn DropdownInput(
                                     SelectOption::<usize> { key: "{oi}", value: oi, index: oi, text_value: opt.clone(), "{opt}" }
                                 }
                             }
-                            if checked && current != Some(group.correct) {
+                            if let Some(c) = group.correct.filter(|c| checked && current != Some(*c)) {
                                 span { class: "answer-note",
-                                    "Correct: {group.options.get(group.correct).cloned().unwrap_or_default()}"
+                                    "Correct: {group.options.get(c).cloned().unwrap_or_default()}"
                                 }
                             }
                         }
@@ -305,8 +330,13 @@ fn DragDropInput(
                     for (si, slot) in slots.iter().enumerate() {
                         {
                             let current = placed[si];
-                            let is_ok = current.and_then(|c| items.get(c)) == items.get(slot.correct);
-                            let state = if !checked { "" } else if is_ok { "correct" } else { "incorrect" };
+                            let expected = slot.correct.and_then(|c| items.get(c));
+                            let is_ok = expected.is_some() && current.and_then(|c| items.get(c)) == expected;
+                            let state = match (checked, expected) {
+                                (true, Some(_)) if is_ok => "correct",
+                                (true, Some(_)) => "incorrect",
+                                _ => "",
+                            };
                             let place_drop = place.clone();
                             let place_click = place.clone();
                             rsx! {
@@ -342,9 +372,9 @@ fn DragDropInput(
                                             None => rsx! { span { class: "muted small", "Drop here" } },
                                         }
                                     }
-                                    if checked && !is_ok {
+                                    if let Some(text) = expected.filter(|_| checked && !is_ok) {
                                         span { class: "tiny", style: "color:var(--ok);font-weight:600",
-                                            "Correct: {items.get(slot.correct).cloned().unwrap_or_default()}"
+                                            "Correct: {text}"
                                         }
                                     }
                                 }

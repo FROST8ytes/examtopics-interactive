@@ -67,6 +67,7 @@ fn pages(text: &str) -> Vec<RawPage> {
         pages.push(RawPage {
             width: 595.0,
             height: 842.0,
+            images: Vec::new(),
             items,
         });
     }
@@ -211,8 +212,8 @@ fn parses_sample_document() {
         QuestionKind::Dropdown { groups } => {
             assert_eq!(groups.len(), 2);
             assert_eq!(groups[0].label, "VM1 can connect to VM2.");
-            assert_eq!(groups[0].correct, 0);
-            assert_eq!(groups[1].correct, 1);
+            assert_eq!(groups[0].correct, Some(0));
+            assert_eq!(groups[1].correct, Some(1));
         }
         k => panic!("unexpected {k:?}"),
     }

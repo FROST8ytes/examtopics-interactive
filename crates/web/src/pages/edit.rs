@@ -226,12 +226,12 @@ fn dropdown_template() -> QuestionKind {
             DropdownGroup {
                 label: "Box 1 / statement 1".into(),
                 options: vec!["Yes".into(), "No".into()],
-                correct: 0,
+                correct: Some(0),
             },
             DropdownGroup {
                 label: "Box 2 / statement 2".into(),
                 options: vec!["Yes".into(), "No".into()],
-                correct: 1,
+                correct: Some(1),
             },
         ],
     }
@@ -247,7 +247,7 @@ fn dragdrop_template(ordered: bool) -> QuestionKind {
                 } else {
                     format!("Target {}", i + 1)
                 },
-                correct: i,
+                correct: Some(i),
             })
             .collect(),
         ordered,

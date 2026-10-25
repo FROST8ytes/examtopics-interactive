@@ -16,7 +16,7 @@ use crate::ui::{Banner, Spinner};
 use dioxus::prelude::*;
 use dioxus_icons::lucide::{FileText, Upload as UploadIcon};
 use examcore::parse::{ParseOutput, ParsedQuestion, plan_sets};
-use examcore::{QuestionKind, VisualVariant};
+use examcore::{QuestionKind, VisualVariant, marks};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -27,6 +27,11 @@ enum Stage {
     Reading {
         done: u32,
         total: u32,
+    },
+    /// Reading answer keys from the answer pictures.
+    Marking {
+        done: usize,
+        total: usize,
     },
     Review,
     Importing {
@@ -124,7 +129,7 @@ pub fn Upload() -> Element {
                 gloo_timers::future::sleep(std::time::Duration::from_millis(0)).await;
             }
         }
-        let out = examcore::parse::parse_pages(&pages);
+        let mut out = examcore::parse::parse_pages(&pages);
         if out.questions.is_empty() {
             let has_text = pages.iter().any(|p| !p.items.is_empty());
             error.set(Some(if has_text {
@@ -134,6 +139,25 @@ pub fn Upload() -> Element {
             }));
             stage.set(Stage::Pick);
             return;
+        }
+        // Hotspot keys are marked in the answer pictures, not written in the text.
+        let unkeyed: Vec<usize> = out
+            .questions
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| {
+                matches!(q.question.kind, QuestionKind::Dropdown { .. })
+                    && !q.question.kind.has_key()
+                    && q.answer_picture.is_some()
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for (n, &i) in unkeyed.iter().enumerate() {
+            stage.set(Stage::Marking {
+                done: n,
+                total: unkeyed.len(),
+            });
+            key_from_pictures(&mut out.questions[i]).await;
         }
         let file_stem = opened.name.trim_end_matches(".pdf").to_string();
         // Exports often have no title page; the file name ("21042026 SC-100 OCR.pdf")
@@ -206,6 +230,16 @@ pub fn Upload() -> Element {
                 }
             }
         },
+        Stage::Marking { done, total } => rsx! {
+            Card {
+                CardContent { style: "padding-top:1.25rem",
+                    div { class: "stack-sm",
+                        div { class: "row", Spinner {} span { "Reading answers from pictures ({done} of {total})…" } }
+                        progress { class: "full", max: "{total.max(1)}", value: "{done}" }
+                    }
+                }
+            }
+        },
         Stage::Importing { label, done, total } => rsx! {
             Card {
                 CardContent { style: "padding-top:1.25rem",
@@ -239,6 +273,19 @@ pub fn Upload() -> Element {
                 .iter()
                 .filter(|q| !q.warnings.is_empty())
                 .count();
+            let images = out
+                .questions
+                .iter()
+                .filter(|q| matches!(q.question.kind, QuestionKind::Visual { .. }))
+                .count();
+            let unkeyed = out
+                .questions
+                .iter()
+                .filter(|q| {
+                    !matches!(q.question.kind, QuestionKind::Visual { .. })
+                        && !q.question.kind.has_key()
+                })
+                .count();
             let plans = plan_sets(&out, chunk().trim().parse().unwrap_or(50));
             let certs = editable.read().clone().unwrap_or_default();
             rsx! {
@@ -257,10 +304,14 @@ pub fn Upload() -> Element {
                                 for (k, n) in by_kind.iter() { Badge { variant: BadgeVariant::Secondary, "{n} × {k}" } }
                                 if warned > 0 { Badge { variant: BadgeVariant::Destructive, "{warned} with warnings" } }
                             }
-                            if by_kind.contains_key("Hotspot") || by_kind.contains_key("Drag & drop") || by_kind.contains_key("Image") {
+                            if unkeyed > 0 || images > 0 {
                                 p { class: "small muted",
-                                    "Image-based questions (hotspot / drag & drop) are shown as page snapshots. "
-                                    "The Claude explainer converts them into interactive dropdowns and drag & drop when it processes them."
+                                    if unkeyed > 0 {
+                                        "{unkeyed} interactive questions have no readable answer key; people answer them and then compare with the answer picture. "
+                                    }
+                                    if images > 0 {
+                                        "{images} questions couldn't be rebuilt from the PDF's text and are shown as page snapshots."
+                                    }
                                 }
                             }
                         }
@@ -436,11 +487,32 @@ fn uuid_v4() -> String {
 }
 
 fn needs_snapshot(q: &ParsedQuestion) -> bool {
-    q.question.has_exhibit
-        || matches!(
-            q.question.kind,
-            QuestionKind::Visual { .. } | QuestionKind::Dropdown { .. }
-        )
+    q.question.has_exhibit || !q.question.kind.has_key()
+}
+
+/// Reads the dropdown keys of a hotspot question from the marks in its answer picture.
+async fn key_from_pictures(pq: &mut ParsedQuestion) {
+    const SCALE: f64 = 2.0;
+    let QuestionKind::Dropdown { groups } = &mut pq.question.kind else {
+        return;
+    };
+    let Some(picture) = pq.answer_picture else {
+        return;
+    };
+    let Ok(Some(answer)) = pdf::pixels(&picture, SCALE).await else {
+        return;
+    };
+    let question = match pq.question_picture {
+        Some(p) => pdf::pixels(&p, SCALE).await.ok().flatten(),
+        None => None,
+    };
+    let question = question.as_ref().map(|p| p.image());
+    if !marks::key_dropdowns(groups, &answer.image(), question.as_ref()) {
+        pq.warnings.push(
+            "The answer couldn't be read from the answer picture; answers are checked against the picture"
+                .into(),
+        );
+    }
 }
 
 async fn run_import(
@@ -549,11 +621,8 @@ async fn run_import(
                         question.images.question = Some(path.clone());
                         uploads.push((path, snap));
                     }
-                    let wants_answer = opts.snapshots_all
-                        || matches!(
-                            question.kind,
-                            QuestionKind::Visual { .. } | QuestionKind::Dropdown { .. }
-                        );
+                    // Without a key, people compare their answer with the answer picture.
+                    let wants_answer = opts.snapshots_all || !question.kind.has_key();
                     if wants_answer
                         && let Ok(Some(snap)) = pdf::snapshot(&pq.answer_regions, 1.6).await
                     {
